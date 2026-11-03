@@ -3,7 +3,6 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from sqlalchemy import or_
-from decimal import Decimal, ROUND_HALF_UP
 from uuid import uuid4
 
 from app.database import get_db
@@ -20,6 +19,8 @@ from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from zoneinfo import ZoneInfo
 from app.models.address import Address
+from app.models.cart import Cart, CartItem
+
 
 router = APIRouter(
     prefix="/orders",
@@ -126,8 +127,36 @@ def create_order(
         subtotal = Decimal("0.00")
         order_items = []
 
-        # Check products and calculate totals
-        for item in order_data.items:
+        # Get the customer's saved cart and lock it
+        cart = (
+            db.query(Cart)
+            .filter(Cart.user_id == current_user.id)
+            .with_for_update()
+            .first()
+        )
+
+        if not cart:
+            raise HTTPException(
+                status_code=400,
+                detail="Your cart is empty"
+            )
+
+        # Lock cart items during checkout
+        cart_items = (
+            db.query(CartItem)
+            .filter(CartItem.cart_id == cart.id)
+            .with_for_update()
+            .all()
+        )
+
+        if not cart_items:
+            raise HTTPException(
+                status_code=400,
+                detail="Your cart is empty"
+            )
+
+        # Validate products and calculate totals
+        for item in cart_items:
 
             product = (
                 db.query(Product)
@@ -159,9 +188,8 @@ def create_order(
             discount = Decimal(str(product.discount_percentage or 0))
 
             unit_price = (
-                original_price * (
-                    Decimal("1") - discount / Decimal("100")
-                )
+                original_price *
+                (Decimal("1") - discount / Decimal("100"))
             ).quantize(
                 Decimal("0.01"),
                 rounding=ROUND_HALF_UP
@@ -187,6 +215,7 @@ def create_order(
             # Deduct stock
             product.stock -= item.quantity
 
+
         # Calculate delivery fee
         if order_data.delivery_type == "delivery":
             delivery_fee = Decimal(str(store_settings.delivery_fee))
@@ -194,8 +223,6 @@ def create_order(
             delivery_fee = Decimal("0.00")
 
 
-
-        #dsbdagshdsgdj
         # Calculate coupon discount
         coupon = None
         coupon_discount = Decimal("0.00")
@@ -229,7 +256,7 @@ def create_order(
             if expiry_date.tzinfo is None:
                 expiry_date = expiry_date.replace(tzinfo=timezone.utc)
 
-            if now < start_date or now > expiry_date:
+            if now < start_date or now >= expiry_date:
                 raise HTTPException(
                     status_code=400,
                     detail="Coupon is not currently valid"
@@ -278,6 +305,12 @@ def create_order(
         # Calculate final order amount
         total_amount = subtotal + delivery_fee - coupon_discount
 
+        if total_amount < Decimal("0.00"):
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid order total"
+            )
+
         # Record successful coupon usage
         if coupon:
             coupon.usage_count += 1
@@ -318,6 +351,11 @@ def create_order(
             )
 
             db.add(order_item)
+
+        # Clear cart after creating order
+        db.query(CartItem).filter(
+            CartItem.cart_id == cart.id
+        ).delete(synchronize_session=False)
 
         db.commit()
         db.refresh(new_order)

@@ -37,7 +37,7 @@ class OrderCreate(BaseModel):
 
     payment_method: Literal["cash", "online"]
 
-    items: list[OrderItemCreate] = Field(..., min_length=1)
+    items: Optional[list[OrderItemCreate]] = None
 
 
     @field_validator("customer_phone")
@@ -85,13 +85,14 @@ class OrderCreate(BaseModel):
         if self.delivery_type == "pickup":
             self.delivery_address = None
 
-        # Prevent duplicate products in one order
-        product_ids = [item.product_id for item in self.items]
+        # Prevent duplicate products when items are provided
+        if self.items:
+            product_ids = [item.product_id for item in self.items]
 
-        if len(product_ids) != len(set(product_ids)):
-            raise ValueError(
-                "Each product can appear only once in an order"
-            )
+            if len(product_ids) != len(set(product_ids)):
+                raise ValueError(
+                    "Each product can appear only once in an order"
+                )
 
         return self
 

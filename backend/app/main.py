@@ -19,6 +19,7 @@ from app.models.order_item import OrderItem
 from app.models.store_setting import StoreSetting
 from app.models.address import Address
 from app.models.coupon import Coupon
+from app.models.cart import Cart, CartItem
 
 
 # Import routers
@@ -30,6 +31,7 @@ from app.routers.store_setting import router as store_setting_router
 from app.routers.address import router as address_router
 from app.routers.customers import router as customers_router
 from app.routers.coupons import router as coupons_router
+from app.routers.cart import router as cart_router
 
 
 # Create database tables
@@ -94,6 +96,7 @@ app.include_router(store_setting_router)
 app.include_router(address_router)
 app.include_router(customers_router)
 app.include_router(coupons_router)
+app.include_router(cart_router)
 
 
 @app.get("/")

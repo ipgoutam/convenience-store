@@ -47,3 +47,20 @@ class UserResponse(BaseModel):
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
+
+
+
+class AdminCustomerResponse(BaseModel):
+    id: int
+    full_name: str
+    email: EmailStr
+    phone: Optional[str]
+    role: str
+    is_active: bool
+    created_at: Optional[datetime] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class CustomerStatusUpdate(BaseModel):
+    is_active: bool

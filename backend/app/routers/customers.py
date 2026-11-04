@@ -45,6 +45,15 @@ def search_customers(
     admin: User = Depends(require_admin)
 ):
     search_term = f"%{keyword.strip()}%"
+    keyword = keyword.strip()
+
+    if not keyword:
+        raise HTTPException(
+            status_code=400,
+            detail="Search keyword cannot be empty"
+        )
+
+    search_term = f"%{keyword}%"
 
     return (
         db.query(User)

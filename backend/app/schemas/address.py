@@ -56,6 +56,9 @@ class AddressUpdate(BaseModel):
     @field_validator("phone")
     @classmethod
     def validate_phone(cls, value):
+        if value is None:
+            return value
+
         value = value.strip()
 
         if not value.isdigit() or len(value) != 10:
@@ -66,6 +69,9 @@ class AddressUpdate(BaseModel):
     @field_validator("pincode")
     @classmethod
     def validate_pincode(cls, value):
+        if value is None:
+            return value
+
         value = value.strip()
 
         if not value.isdigit() or len(value) != 6:

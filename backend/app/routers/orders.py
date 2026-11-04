@@ -11,7 +11,7 @@ from app.models.order_item import OrderItem
 from app.models.product import Product
 from app.models.user import User
 from app.models.coupon import Coupon
-from app.schemas.order import OrderCreate, OrderResponse, OrderStatusUpdate, PaymentStatusUpdate
+from app.schemas.order import OrderCreate, OrderResponse, OrderStatusUpdate
 from app.routers.auth import get_current_user, require_admin
 from app.models.store_setting import StoreSetting
 from typing import Optional
@@ -20,13 +20,34 @@ from decimal import Decimal, ROUND_HALF_UP
 from zoneinfo import ZoneInfo
 from app.models.address import Address
 from app.models.cart import Cart, CartItem
+from app.services.notification_service import create_notification
 
 
 router = APIRouter(
     prefix="/orders",
     tags=["Orders"]
 )
+def notify_all_admins(
+    db: Session,
+    title: str,
+    message: str,
+    notification_type: str,
+    order_id: int
+):
+    admins = db.query(User).filter(
+        User.role.in_(["admin", "super_admin"]),
+        User.is_active == True
+    ).all()
 
+    for admin in admins:
+        create_notification(
+            db=db,
+            user_id=admin.id,
+            title=title,
+            message=message,
+            notification_type=notification_type,
+            order_id=order_id
+        )
 
 # CUSTOMER: Place an order
 @router.post("/", response_model=OrderResponse, status_code=status.HTTP_201_CREATED)
@@ -365,6 +386,26 @@ def create_order(
             CartItem.cart_id == cart.id
         ).delete(synchronize_session=False)
 
+
+        # Notify customer
+        create_notification(
+            db=db,
+            user_id=current_user.id,
+            title="Order placed successfully",
+            message=f"Your order #{new_order.order_number} has been placed successfully.",
+            notification_type="order_placed",
+            order_id=new_order.id
+        )
+
+        # Notify all active admins
+        notify_all_admins(
+            db=db,
+            title="New order received!",
+            message=f"{current_user.full_name} placed order #{new_order.order_number}.",
+            notification_type="new_order",
+            order_id=new_order.id
+        )
+
         db.commit()
         db.refresh(new_order)
 
@@ -604,6 +645,25 @@ def cancel_my_order(
 
         order.order_status = "cancelled"
 
+        # Notify customer
+        create_notification(
+            db=db,
+            user_id=current_user.id,
+            title="Order cancelled",
+            message=f"Your order #{order.order_number} has been cancelled.",
+            notification_type="order_cancelled",
+            order_id=order.id
+        )
+
+        # Notify admins
+        notify_all_admins(
+            db=db,
+            title="Order cancellation",
+            message=f"Customer cancelled order #{order.order_number}.",
+            notification_type="order_cancelled",
+            order_id=order.id
+        )
+
         db.commit()
         db.refresh(order)
 
@@ -693,6 +753,28 @@ def update_order_status(
                         product.stock += item.quantity
 
         order.order_status = new_status
+
+        # Notify customer about order status
+        status_messages = {
+            "confirmed": "Your order has been confirmed.",
+            "preparing": "Your order is being prepared.",
+            "ready_for_pickup": "Your order is ready for pickup.",
+            "out_for_delivery": "Your order is out for delivery.",
+            "completed": "Your order has been completed.",
+            "cancelled": "Your order has been cancelled by the store."
+        }
+
+        create_notification(
+            db=db,
+            user_id=order.customer_id,
+            title=f"Order {new_status.replace('_', ' ').title()}",
+            message=status_messages.get(
+                new_status,
+                f"Your order status is now {new_status}."
+            ),
+            notification_type=f"order_{new_status}",
+            order_id=order.id
+        )
 
         db.commit()
         db.refresh(order)
@@ -791,70 +873,4 @@ def get_my_order(
         raise HTTPException(status_code=404, detail="Order not found")
 
     return order
-
-
-
-# ADMIN: Update payment status
-@router.patch("/{order_id}/payment", response_model=OrderResponse)
-def update_payment_status(
-    order_id: int,
-    payment_data: PaymentStatusUpdate,
-    db: Session = Depends(get_db),
-    admin: User = Depends(require_admin)
-):
-    order = (
-        db.query(Order)
-        .filter(Order.id == order_id)
-        .with_for_update()
-        .first()
-    )
-
-    if not order:
-        raise HTTPException(
-            status_code=404,
-            detail="Order not found"
-        )
-
-    new_status = payment_data.payment_status
-    current_status = order.payment_status
-
-    # Allow only valid payment status transitions
-    allowed_transitions = {
-        "pending": ["paid", "failed"],
-        "failed": ["paid"],
-        "paid": ["refunded"],
-        "refunded": []
-    }
-
-    # Prevent unnecessary or invalid status changes
-    if new_status == current_status:
-        return order
-
-    if new_status not in allowed_transitions.get(current_status, []):
-        raise HTTPException(
-            status_code=400,
-            detail=f"Cannot change payment status from {current_status} to {new_status}"
-        )
-
-    # A cancelled order cannot receive a payment
-    if order.order_status == "cancelled" and new_status == "paid":
-        raise HTTPException(
-            status_code=400,
-            detail="Cannot mark a cancelled order as paid"
-        )
-
-    try:
-        order.payment_status = new_status
-
-        db.commit()
-        db.refresh(order)
-
-        return order
-
-    except Exception:
-        db.rollback()
-        raise HTTPException(
-            status_code=500,
-            detail="Could not update payment status"
-        )
 

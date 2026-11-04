@@ -21,6 +21,9 @@ from app.models.address import Address
 from app.models.coupon import Coupon
 from app.models.cart import Cart, CartItem
 from app.models.payment import Payment
+from app.models.notification import Notification
+from app.models.admin_invite import AdminInvite
+from app.models.refund_attempt import RefundAttempt
 
 
 # Import routers
@@ -34,6 +37,9 @@ from app.routers.customers import router as customers_router
 from app.routers.coupons import router as coupons_router
 from app.routers.cart import router as cart_router
 from app.routers.payments import router as payments_router
+from app.routers.notifications import router as notifications_router
+from app.routers.dashboard import router as dashboard_router
+from app.routers.admin_management import router as admin_management_router
 
 
 # Create database tables
@@ -100,6 +106,9 @@ app.include_router(customers_router)
 app.include_router(coupons_router)
 app.include_router(cart_router)
 app.include_router(payments_router)
+app.include_router(notifications_router)
+app.include_router(dashboard_router)
+app.include_router(admin_management_router)
 
 
 @app.get("/")

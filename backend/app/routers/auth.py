@@ -1,4 +1,5 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
@@ -31,12 +32,10 @@ bearer_scheme = HTTPBearer()
 REFRESH_TOKEN_EXPIRE_DAYS = 7
 
 
-# Hash refresh token before storing it
 def hash_refresh_token(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
-# Create and store refresh token
 def create_refresh_token(db: Session, user_id: int):
     token = secrets.token_urlsafe(48)
 
@@ -53,7 +52,6 @@ def create_refresh_token(db: Session, user_id: int):
     return token
 
 
-# Generate access and refresh tokens
 def generate_tokens(db: Session, user: User):
     access_token = create_access_token({
         "sub": str(user.id),
@@ -69,13 +67,11 @@ def generate_tokens(db: Session, user: User):
     }
 
 
-# Get currently logged-in user
 def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
     db: Session = Depends(get_db)
 ):
-    token = credentials.credentials
-    payload = decode_access_token(token)
+    payload = decode_access_token(credentials.credentials)
 
     if payload is None:
         raise HTTPException(
@@ -91,7 +87,15 @@ def get_current_user(
             detail="Invalid access token"
         )
 
-    user = db.query(User).filter(User.id == int(user_id)).first()
+    try:
+        user_id = int(user_id)
+    except (ValueError, TypeError):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid access token"
+        )
+
+    user = db.query(User).filter(User.id == user_id).first()
 
     if not user or not user.is_active:
         raise HTTPException(
@@ -102,9 +106,9 @@ def get_current_user(
     return user
 
 
-# Admin-only authorization
+# Admin and super admin can use normal admin features.
 def require_admin(current_user: User = Depends(get_current_user)):
-    if current_user.role != "admin":
+    if current_user.role not in ["admin", "super_admin"]:
         raise HTTPException(
             status_code=403,
             detail="Admin access required"
@@ -113,12 +117,27 @@ def require_admin(current_user: User = Depends(get_current_user)):
     return current_user
 
 
-# 1. Register
-@router.post("/register", response_model=UserResponse, status_code=201)
-def register(user_data: UserCreate, db: Session = Depends(get_db)):
+# Only super admins can manage administrator accounts.
+def require_super_admin(
+    current_user: User = Depends(get_current_user)
+):
+    if current_user.role != "super_admin":
+        raise HTTPException(
+            status_code=403,
+            detail="Super admin access required"
+        )
 
+    return current_user
+
+
+# 1. Customer registration
+@router.post("/register", response_model=UserResponse, status_code=201)
+def register(
+    user_data: UserCreate,
+    db: Session = Depends(get_db)
+):
     existing_user = db.query(User).filter(
-        User.email == user_data.email
+        User.email == str(user_data.email).lower()
     ).first()
 
     if existing_user:
@@ -162,8 +181,10 @@ def register(user_data: UserCreate, db: Session = Depends(get_db)):
 
 # 2. Login
 @router.post("/login")
-def login(login_data: UserLogin, db: Session = Depends(get_db)):
-
+def login(
+    login_data: UserLogin,
+    db: Session = Depends(get_db)
+):
     user = db.query(User).filter(
         User.email == str(login_data.email).lower()
     ).first()
@@ -192,12 +213,11 @@ def refresh_access_token(
     refresh_token: str,
     db: Session = Depends(get_db)
 ):
-
     token_hash = hash_refresh_token(refresh_token)
 
     record = db.query(RefreshToken).filter(
         RefreshToken.token_hash == token_hash
-    ).first()
+    ).with_for_update().first()
 
     now = datetime.now(timezone.utc)
 
@@ -226,7 +246,6 @@ def refresh_access_token(
             detail="User not found or inactive"
         )
 
-    # Rotate old refresh token
     record.revoked_at = now
     db.commit()
 
@@ -248,7 +267,6 @@ def update_profile(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-
     if user_data.phone:
         existing_phone = db.query(User).filter(
             User.phone == user_data.phone,
@@ -280,7 +298,6 @@ def change_password(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-
     if not verify_password(
         password_data.old_password,
         current_user.hashed_password
@@ -294,7 +311,6 @@ def change_password(
         password_data.new_password
     )
 
-    # Revoke all existing refresh tokens
     db.query(RefreshToken).filter(
         RefreshToken.user_id == current_user.id,
         RefreshToken.revoked_at.is_(None)
@@ -314,7 +330,6 @@ def logout(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-
     record = db.query(RefreshToken).filter(
         RefreshToken.token_hash == hash_refresh_token(refresh_token),
         RefreshToken.user_id == current_user.id,

@@ -132,6 +132,8 @@ def update_address(
             )
 
     try:
+        was_default = address.is_default
+
         if update_data.get("is_default") is True:
             db.query(Address).filter(
                 Address.user_id == current_user.id,
@@ -141,9 +143,19 @@ def update_address(
         for field, value in update_data.items():
             setattr(address, field, value)
 
+        if was_default and update_data.get("is_default") is False:
+            next_address = db.query(Address).filter(
+                Address.user_id == current_user.id,
+                Address.id != address_id
+            ).order_by(Address.id.asc()).first()
+
+            if next_address:
+                next_address.is_default = True
+            else:
+                address.is_default = True
+
         db.commit()
         db.refresh(address)
-
         return address
 
     except Exception:

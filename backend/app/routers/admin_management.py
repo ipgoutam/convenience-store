@@ -21,9 +21,7 @@ from app.schemas.admin_invite import (
 )
 
 from app.auth.security import hash_password
-from app.routers.auth import (
-    require_super_admin
-)
+from app.routers.auth import require_super_admin
 
 
 router = APIRouter(
@@ -35,20 +33,36 @@ INVITE_EXPIRE_HOURS = 48
 
 
 def hash_invite_token(token: str) -> str:
-    return hashlib.sha256(token.encode()).hexdigest()
+    return hashlib.sha256(
+        token.encode("utf-8")
+    ).hexdigest()
+
+
+def normalize_email(email: str) -> str:
+    return email.strip().lower()
+
+
+def normalize_datetime(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+
+    return value.astimezone(timezone.utc)
 
 
 # --------------------------------------------------
 # 1. CREATE ADMIN INVITATION
 # --------------------------------------------------
 
-@router.post("/invites", response_model=AdminInviteResponse)
+@router.post(
+    "/invites",
+    response_model=AdminInviteResponse
+)
 def create_admin_invite(
     invite_data: AdminInviteCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_super_admin)
 ):
-    email = str(invite_data.email).lower()
+    email = normalize_email(str(invite_data.email))
 
     existing_user = db.query(User).filter(
         User.email == email
@@ -81,41 +95,59 @@ def create_admin_invite(
         email=email,
         token_hash=hash_invite_token(token),
         created_by=current_user.id,
-        expires_at=now + timedelta(hours=INVITE_EXPIRE_HOURS)
+        expires_at=now + timedelta(
+            hours=INVITE_EXPIRE_HOURS
+        )
     )
 
-    db.add(invitation)
-
     try:
+        db.add(invitation)
         db.commit()
+
+        return {
+            "email": email,
+            "invitation_token": token,
+            "expires_in_hours": INVITE_EXPIRE_HOURS
+        }
+
     except IntegrityError:
         db.rollback()
+
         raise HTTPException(
             status_code=409,
-            detail="Unable to create invitation"
+            detail="Unable to create invitation. An invitation may already exist."
         )
 
-    return {
-        "email": email,
-        "invitation_token": token,
-        "expires_in_hours": INVITE_EXPIRE_HOURS
-    }
+    except Exception:
+        db.rollback()
+
+        raise HTTPException(
+            status_code=500,
+            detail="Could not create invitation"
+        )
 
 
 # --------------------------------------------------
 # 2. ACCEPT ADMIN INVITATION
 # --------------------------------------------------
 
-@router.post("/invites/accept", response_model=AdminAccountResponse)
+@router.post(
+    "/invites/accept",
+    response_model=AdminAccountResponse
+)
 def accept_admin_invite(
     invite_data: AdminInviteAccept,
     db: Session = Depends(get_db)
 ):
-    token_hash = hash_invite_token(invite_data.token)
+    token_hash = hash_invite_token(
+        invite_data.token
+    )
 
     invitation = (
         db.query(AdminInvite)
-        .filter(AdminInvite.token_hash == token_hash)
+        .filter(
+            AdminInvite.token_hash == token_hash
+        )
         .with_for_update()
         .first()
     )
@@ -140,13 +172,17 @@ def accept_admin_invite(
             detail="Invitation has been revoked"
         )
 
-    if invitation.expires_at <= now:
+    expires_at = normalize_datetime(
+        invitation.expires_at
+    )
+
+    if expires_at <= now:
         raise HTTPException(
             status_code=400,
             detail="Invitation has expired"
         )
 
-    email = invitation.email.lower()
+    email = normalize_email(invitation.email)
 
     existing_user = db.query(User).filter(
         User.email == email
@@ -162,7 +198,9 @@ def accept_admin_invite(
         full_name=invite_data.full_name.strip(),
         email=email,
         phone=invite_data.phone,
-        hashed_password=hash_password(invite_data.password),
+        hashed_password=hash_password(
+            invite_data.password
+        ),
         role="admin",
         is_active=True
     )
@@ -176,28 +214,42 @@ def accept_admin_invite(
         db.commit()
         db.refresh(new_admin)
 
+        return new_admin
+
     except IntegrityError:
         db.rollback()
+
         raise HTTPException(
             status_code=409,
             detail="Email or phone number already registered"
         )
 
-    return new_admin
+    except Exception:
+        db.rollback()
+
+        raise HTTPException(
+            status_code=500,
+            detail="Could not accept invitation"
+        )
 
 
 # --------------------------------------------------
 # 3. LIST ADMIN ACCOUNTS
 # --------------------------------------------------
 
-@router.get("/admins", response_model=list[AdminAccountResponse])
+@router.get(
+    "/admins",
+    response_model=list[AdminAccountResponse]
+)
 def list_admins(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_super_admin)
 ):
     return (
         db.query(User)
-        .filter(User.role.in_(["admin", "super_admin"]))
+        .filter(
+            User.role.in_(["admin", "super_admin"])
+        )
         .order_by(User.created_at.desc())
         .all()
     )
@@ -213,11 +265,17 @@ def deactivate_admin(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_super_admin)
 ):
-    admin = db.query(User).filter(
-        User.id == admin_id
-    ).with_for_update().first()
+    admin = (
+        db.query(User)
+        .filter(User.id == admin_id)
+        .with_for_update()
+        .first()
+    )
 
-    if not admin or admin.role not in ["admin", "super_admin"]:
+    if not admin or admin.role not in [
+        "admin",
+        "super_admin"
+    ]:
         raise HTTPException(
             status_code=404,
             detail="Admin account not found"
@@ -252,19 +310,35 @@ def deactivate_admin(
                 detail="Cannot deactivate the last active super admin"
             )
 
-    admin.is_active = False
+    try:
+        admin.is_active = False
 
-    # Revoke all active refresh tokens.
-    db.query(RefreshToken).filter(
-        RefreshToken.user_id == admin.id,
-        RefreshToken.revoked_at.is_(None)
-    ).update({
-        RefreshToken.revoked_at: datetime.now(timezone.utc)
-    })
+        # Revoke all active refresh tokens.
+        db.query(RefreshToken).filter(
+            RefreshToken.user_id == admin.id,
+            RefreshToken.revoked_at.is_(None)
+        ).update(
+            {
+                RefreshToken.revoked_at: datetime.now(
+                    timezone.utc
+                )
+            },
+            synchronize_session=False
+        )
 
-    db.commit()
+        db.commit()
 
-    return {"message": "Admin account deactivated successfully"}
+        return {
+            "message": "Admin account deactivated successfully"
+        }
+
+    except Exception:
+        db.rollback()
+
+        raise HTTPException(
+            status_code=500,
+            detail="Could not deactivate admin account"
+        )
 
 
 # --------------------------------------------------
@@ -277,11 +351,17 @@ def activate_admin(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_super_admin)
 ):
-    admin = db.query(User).filter(
-        User.id == admin_id
-    ).first()
+    admin = (
+        db.query(User)
+        .filter(User.id == admin_id)
+        .with_for_update()
+        .first()
+    )
 
-    if not admin or admin.role not in ["admin", "super_admin"]:
+    if not admin or admin.role not in [
+        "admin",
+        "super_admin"
+    ]:
         raise HTTPException(
             status_code=404,
             detail="Admin account not found"
@@ -293,10 +373,21 @@ def activate_admin(
             detail="Admin account is already active"
         )
 
-    admin.is_active = True
-    db.commit()
+    try:
+        admin.is_active = True
+        db.commit()
 
-    return {"message": "Admin account activated successfully"}
+        return {
+            "message": "Admin account activated successfully"
+        }
+
+    except Exception:
+        db.rollback()
+
+        raise HTTPException(
+            status_code=500,
+            detail="Could not activate admin account"
+        )
 
 
 # --------------------------------------------------
@@ -309,9 +400,12 @@ def revoke_admin_invite(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_super_admin)
 ):
-    invitation = db.query(AdminInvite).filter(
-        AdminInvite.id == invite_id
-    ).with_for_update().first()
+    invitation = (
+        db.query(AdminInvite)
+        .filter(AdminInvite.id == invite_id)
+        .with_for_update()
+        .first()
+    )
 
     if not invitation:
         raise HTTPException(
@@ -331,7 +425,21 @@ def revoke_admin_invite(
             detail="Invitation is already revoked"
         )
 
-    invitation.revoked_at = datetime.now(timezone.utc)
-    db.commit()
+    try:
+        invitation.revoked_at = datetime.now(
+            timezone.utc
+        )
 
-    return {"message": "Invitation revoked successfully"}
+        db.commit()
+
+        return {
+            "message": "Invitation revoked successfully"
+        }
+
+    except Exception:
+        db.rollback()
+
+        raise HTTPException(
+            status_code=500,
+            detail="Could not revoke invitation"
+        )

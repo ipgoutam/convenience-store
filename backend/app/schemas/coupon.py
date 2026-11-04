@@ -35,7 +35,12 @@ class CouponCreate(BaseModel):
     @field_validator("code")
     @classmethod
     def clean_code(cls, value):
-        return value.strip().upper()
+        value = value.strip().upper()
+
+        if len(value) < 3:
+            raise ValueError("Coupon code must contain at least 3 characters")
+
+        return value
 
     @model_validator(mode="after")
     def validate_coupon(self):
@@ -99,4 +104,9 @@ class CouponValidate(BaseModel):
     @field_validator("code")
     @classmethod
     def clean_code(cls, value):
-        return value.strip().upper()
+        value = value.strip().upper()
+
+        if len(value) < 3:
+            raise ValueError("Coupon code must contain at least 3 characters")
+
+        return value

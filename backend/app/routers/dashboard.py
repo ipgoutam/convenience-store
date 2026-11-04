@@ -1,10 +1,10 @@
 
-from datetime import datetime, date, time, timedelta
+from datetime import datetime, date, time, timedelta, timezone
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 from collections import defaultdict
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 
@@ -46,13 +46,28 @@ def get_sales_orders(db: Session, start_date=None):
     )
 
     if start_date:
-        query = query.filter(Order.created_at >= start_date)
+        query = query.filter(
+            Order.created_at >= start_date
+        )
 
     return query.all()
 
 
 def decimal_to_float(value):
     return float(value or 0)
+
+
+def get_order_local_date(created_at):
+    if created_at is None:
+        return None
+
+    # PostgreSQL timestamps may be returned without timezone
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(
+            tzinfo=timezone.utc
+        )
+
+    return created_at.astimezone(IST).date()
 
 
 # --------------------------------------------------
@@ -66,66 +81,89 @@ def dashboard_summary(
 ):
     today, start, end = get_today_range()
 
-    total_orders = db.query(
-        func.count(Order.id)
-    ).scalar() or 0
+    total_orders = (
+        db.query(func.count(Order.id))
+        .scalar() or 0
+    )
 
-    today_orders = db.query(
-        func.count(Order.id)
-    ).filter(
-        Order.created_at >= start,
-        Order.created_at < end
-    ).scalar() or 0
+    today_orders = (
+        db.query(func.count(Order.id))
+        .filter(
+            Order.created_at >= start,
+            Order.created_at < end
+        )
+        .scalar() or 0
+    )
 
-    pending_orders = db.query(
-        func.count(Order.id)
-    ).filter(
-        Order.order_status == "pending"
-    ).scalar() or 0
+    pending_orders = (
+        db.query(func.count(Order.id))
+        .filter(Order.order_status == "pending")
+        .scalar() or 0
+    )
 
-    completed_orders = db.query(
-        func.count(Order.id)
-    ).filter(
-        Order.order_status == "completed"
-    ).scalar() or 0
+    completed_orders = (
+        db.query(func.count(Order.id))
+        .filter(Order.order_status == "completed")
+        .scalar() or 0
+    )
 
-    cancelled_orders = db.query(
-        func.count(Order.id)
-    ).filter(
-        Order.order_status == "cancelled"
-    ).scalar() or 0
+    cancelled_orders = (
+        db.query(func.count(Order.id))
+        .filter(Order.order_status == "cancelled")
+        .scalar() or 0
+    )
 
-    total_customers = db.query(
-        func.count(User.id)
-    ).filter(
-        User.role == "customer"
-    ).scalar() or 0
+    total_customers = (
+        db.query(func.count(User.id))
+        .filter(User.role == "customer")
+        .scalar() or 0
+    )
 
-    revenue = db.query(
-        func.coalesce(func.sum(Order.total_amount), 0)
-    ).filter(
-        Order.payment_status == "paid",
-        Order.order_status != "cancelled"
-    ).scalar()
+    revenue = (
+        db.query(
+            func.coalesce(
+                func.sum(Order.total_amount),
+                0
+            )
+        )
+        .filter(
+            Order.payment_status == "paid",
+            Order.order_status != "cancelled"
+        )
+        .scalar()
+    )
 
-    today_revenue = db.query(
-        func.coalesce(func.sum(Order.total_amount), 0)
-    ).filter(
-        Order.payment_status == "paid",
-        Order.order_status != "cancelled",
-        Order.created_at >= start,
-        Order.created_at < end
-    ).scalar()
+    today_revenue = (
+        db.query(
+            func.coalesce(
+                func.sum(Order.total_amount),
+                0
+            )
+        )
+        .filter(
+            Order.payment_status == "paid",
+            Order.order_status != "cancelled",
+            Order.created_at >= start,
+            Order.created_at < end
+        )
+        .scalar()
+    )
 
-    total_products = db.query(
-        func.count(Product.id)
-    ).scalar() or 0
+    total_products = (
+        db.query(func.count(Product.id))
+        .scalar() or 0
+    )
 
-    low_stock_products = db.query(
-        func.count(Product.id)
-    ).filter(
-        Product.stock <= 5
-    ).scalar() or 0
+    low_stock_products = (
+        db.query(func.count(Product.id))
+        .filter(
+            Product.stock <= func.coalesce(
+                Product.low_stock_threshold,
+                5
+            )
+        )
+        .scalar() or 0
+    )
 
     return {
         "total_orders": total_orders,
@@ -153,25 +191,30 @@ def daily_sales(
     today = datetime.now(IST).date()
     start_date = today - timedelta(days=6)
 
-    orders = get_sales_orders(
-        db,
-        datetime.combine(
-            start_date,
-            time.min,
-            tzinfo=IST
-        )
+    start_datetime = datetime.combine(
+        start_date,
+        time.min,
+        tzinfo=IST
     )
 
-    sales_by_date = defaultdict(float)
+    orders = get_sales_orders(
+        db,
+        start_datetime
+    )
+
+    sales_by_date = defaultdict(
+        lambda: Decimal("0.00")
+    )
 
     for order in orders:
-        if not order.created_at:
-            continue
+        order_date = get_order_local_date(
+            order.created_at
+        )
 
-        order_date = order.created_at.astimezone(IST).date()
-
-        if start_date <= order_date <= today:
-            sales_by_date[order_date] += float(order.total_amount)
+        if order_date and start_date <= order_date <= today:
+            sales_by_date[order_date] += Decimal(
+                str(order.total_amount or 0)
+            )
 
     result = []
 
@@ -181,7 +224,7 @@ def daily_sales(
         result.append({
             "date": current_date.isoformat(),
             "revenue": round(
-                sales_by_date[current_date],
+                float(sales_by_date[current_date]),
                 2
             )
         })
@@ -202,7 +245,6 @@ def monthly_sales(
     current_user: User = Depends(require_admin)
 ):
     today = datetime.now(IST).date()
-
     current_month = today.replace(day=1)
 
     month_starts = []
@@ -215,38 +257,58 @@ def monthly_sales(
             month += 12
             year -= 1
 
-        month_starts.append(date(year, month, 1))
+        month_starts.append(
+            date(year, month, 1)
+        )
 
     first_month = month_starts[0]
 
-    orders = get_sales_orders(
-        db,
-        datetime.combine(
-            first_month,
-            time.min,
-            tzinfo=IST
-        )
+    start_datetime = datetime.combine(
+        first_month,
+        time.min,
+        tzinfo=IST
     )
 
-    sales_by_month = defaultdict(float)
+    orders = get_sales_orders(
+        db,
+        start_datetime
+    )
+
+    sales_by_month = defaultdict(
+        lambda: Decimal("0.00")
+    )
 
     for order in orders:
-        if not order.created_at:
+        order_date = get_order_local_date(
+            order.created_at
+        )
+
+        if order_date is None:
             continue
 
-        order_date = order.created_at.astimezone(IST).date()
-        month_key = (order_date.year, order_date.month)
+        month_key = (
+            order_date.year,
+            order_date.month
+        )
 
-        sales_by_month[month_key] += float(order.total_amount)
+        sales_by_month[month_key] += Decimal(
+            str(order.total_amount or 0)
+        )
 
     result = []
 
     for month_date in month_starts:
-        key = (month_date.year, month_date.month)
+        key = (
+            month_date.year,
+            month_date.month
+        )
 
         result.append({
             "month": month_date.strftime("%b %Y"),
-            "revenue": round(sales_by_month[key], 2)
+            "revenue": round(
+                float(sales_by_month[key]),
+                2
+            )
         })
 
     return {
@@ -261,25 +323,34 @@ def monthly_sales(
 
 @router.get("/best-selling-products")
 def best_selling_products(
-    limit: int = 10,
+    limit: int = Query(10, ge=1, le=50),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin)
 ):
-    limit = max(1, min(limit, 50))
-
     results = (
         db.query(
             OrderItem.product_name,
-            func.sum(OrderItem.quantity).label("total_quantity"),
-            func.sum(OrderItem.line_total).label("total_sales")
+            func.sum(
+                OrderItem.quantity
+            ).label("total_quantity"),
+            func.sum(
+                OrderItem.line_total
+            ).label("total_sales")
         )
-        .join(Order, OrderItem.order_id == Order.id)
+        .join(
+            Order,
+            OrderItem.order_id == Order.id
+        )
         .filter(
             Order.payment_status == "paid",
             Order.order_status != "cancelled"
         )
-        .group_by(OrderItem.product_name)
-        .order_by(func.sum(OrderItem.quantity).desc())
+        .group_by(
+            OrderItem.product_name
+        )
+        .order_by(
+            func.sum(OrderItem.quantity).desc()
+        )
         .limit(limit)
         .all()
     )
@@ -287,8 +358,12 @@ def best_selling_products(
     return [
         {
             "product_name": item.product_name,
-            "total_quantity_sold": int(item.total_quantity or 0),
-            "total_sales": decimal_to_float(item.total_sales)
+            "total_quantity_sold": decimal_to_float(
+                item.total_quantity
+            ),
+            "total_sales": decimal_to_float(
+                item.total_sales
+            )
         }
         for item in results
     ]
@@ -300,15 +375,30 @@ def best_selling_products(
 
 @router.get("/low-stock-products")
 def low_stock_products(
-    threshold: int = 5,
+    threshold: int | None = Query(
+        None,
+        ge=0,
+        le=1000
+    ),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin)
 ):
-    threshold = max(0, min(threshold, 1000))
+    query = db.query(Product)
+
+    if threshold is not None:
+        query = query.filter(
+            Product.stock <= threshold
+        )
+    else:
+        query = query.filter(
+            Product.stock <= func.coalesce(
+                Product.low_stock_threshold,
+                5
+            )
+        )
 
     products = (
-        db.query(Product)
-        .filter(Product.stock <= threshold)
+        query
         .order_by(Product.stock.asc())
         .all()
     )
@@ -319,7 +409,12 @@ def low_stock_products(
             "name": product.name,
             "category": product.category,
             "stock": product.stock,
-            "price": float(product.price),
+            "low_stock_threshold": (
+                product.low_stock_threshold
+                if product.low_stock_threshold is not None
+                else 5
+            ),
+            "price": decimal_to_float(product.price),
             "is_available": product.is_available
         }
         for product in products
@@ -332,12 +427,10 @@ def low_stock_products(
 
 @router.get("/recent-orders")
 def recent_orders(
-    limit: int = 10,
+    limit: int = Query(10, ge=1, le=100),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin)
 ):
-    limit = max(1, min(limit, 100))
-
     orders = (
         db.query(Order)
         .order_by(Order.created_at.desc())
@@ -351,7 +444,9 @@ def recent_orders(
             "order_number": order.order_number,
             "customer_id": order.customer_id,
             "delivery_type": order.delivery_type,
-            "total_amount": float(order.total_amount),
+            "total_amount": decimal_to_float(
+                order.total_amount
+            ),
             "payment_method": order.payment_method,
             "payment_status": order.payment_status,
             "order_status": order.order_status,
@@ -370,39 +465,73 @@ def payment_statistics(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin)
 ):
-    total_payments = db.query(
-        func.count(Payment.id)
-    ).scalar() or 0
+    # Razorpay payment statistics
+    total_payments = (
+        db.query(func.count(Payment.id))
+        .scalar() or 0
+    )
 
-    paid_payments = db.query(
-        func.count(Payment.id)
-    ).filter(
-        Payment.status == "paid"
-    ).scalar() or 0
+    paid_payments = (
+        db.query(func.count(Payment.id))
+        .filter(Payment.status == "paid")
+        .scalar() or 0
+    )
 
-    pending_payments = db.query(
-        func.count(Payment.id)
-    ).filter(
-        Payment.status.in_(["pending", "refund_pending"])
-    ).scalar() or 0
+    pending_payments = (
+        db.query(func.count(Payment.id))
+        .filter(
+            Payment.status.in_([
+                "pending",
+                "refund_pending"
+            ])
+        )
+        .scalar() or 0
+    )
 
-    failed_payments = db.query(
-        func.count(Payment.id)
-    ).filter(
-        Payment.status == "failed"
-    ).scalar() or 0
+    failed_payments = (
+        db.query(func.count(Payment.id))
+        .filter(Payment.status == "failed")
+        .scalar() or 0
+    )
 
-    refunded_payments = db.query(
-        func.count(Payment.id)
-    ).filter(
-        Payment.status == "refunded"
-    ).scalar() or 0
+    refunded_payments = (
+        db.query(func.count(Payment.id))
+        .filter(Payment.status == "refunded")
+        .scalar() or 0
+    )
 
-    total_collected = db.query(
-        func.coalesce(func.sum(Payment.amount), 0)
-    ).filter(
-        Payment.status == "paid"
-    ).scalar()
+    online_collected = (
+        db.query(
+            func.coalesce(
+                func.sum(Payment.amount),
+                0
+            )
+        )
+        .filter(Payment.status == "paid")
+        .scalar()
+    )
+
+    # Cash-on-delivery collections are stored on Order,
+    # not in the Razorpay Payment table.
+    cod_collected = (
+        db.query(
+            func.coalesce(
+                func.sum(Order.total_amount),
+                0
+            )
+        )
+        .filter(
+            Order.payment_method == "cash",
+            Order.payment_status == "paid",
+            Order.order_status != "cancelled"
+        )
+        .scalar()
+    )
+
+    total_collected = (
+        Decimal(str(online_collected or 0))
+        + Decimal(str(cod_collected or 0))
+    )
 
     return {
         "total_payments": total_payments,
@@ -410,5 +539,13 @@ def payment_statistics(
         "pending_payments": pending_payments,
         "failed_payments": failed_payments,
         "refunded_payments": refunded_payments,
-        "total_collected": decimal_to_float(total_collected)
+        "online_collected": decimal_to_float(
+            online_collected
+        ),
+        "cod_collected": decimal_to_float(
+            cod_collected
+        ),
+        "total_collected": decimal_to_float(
+            total_collected
+        )
     }

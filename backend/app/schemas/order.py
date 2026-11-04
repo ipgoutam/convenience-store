@@ -12,22 +12,64 @@ from datetime import datetime
 from decimal import Decimal
 
 
+PurchaseMode = Literal["quantity", "amount"]
+
+
 class OrderItemCreate(BaseModel):
     product_id: int = Field(..., gt=0)
-    quantity: int = Field(..., gt=0)
+    purchase_mode: PurchaseMode = "quantity"
+    quantity: Optional[Decimal] = Field(
+        default=None,
+        gt=0,
+        max_digits=18,
+        decimal_places=12
+    )
+    amount: Optional[Decimal] = Field(
+        default=None,
+        gt=0,
+        max_digits=10,
+        decimal_places=2
+    )
 
+    @model_validator(mode="after")
+    def validate_purchase_input(self):
+        if self.purchase_mode == "quantity":
+            if self.quantity is None:
+                raise ValueError("Quantity is required")
+
+            if self.amount is not None:
+                raise ValueError(
+                    "Amount must not be provided for quantity-based purchases"
+                )
+
+        elif self.purchase_mode == "amount":
+            if self.amount is None:
+                raise ValueError("Amount is required")
+
+            if self.quantity is not None:
+                raise ValueError(
+                    "Quantity must not be provided for amount-based purchases"
+                )
+
+        return self
 
 
 class OrderCreate(BaseModel):
     delivery_type: Literal["pickup", "delivery"]
+
     delivery_address: Optional[str] = None
     address_id: Optional[int] = Field(default=None, gt=0)
+
     customer_phone: Optional[str] = Field(
         default=None,
         min_length=10,
         max_length=15
     )
-    notes: Optional[str] = Field(default=None, max_length=500)
+
+    notes: Optional[str] = Field(
+        default=None,
+        max_length=500
+    )
 
     coupon_code: Optional[str] = Field(
         default=None,
@@ -39,7 +81,6 @@ class OrderCreate(BaseModel):
 
     items: Optional[list[OrderItemCreate]] = None
 
-
     @field_validator("customer_phone")
     @classmethod
     def validate_phone(cls, value):
@@ -50,7 +91,9 @@ class OrderCreate(BaseModel):
         normalized = re.sub(r"[\s-]", "", value)
 
         if not re.fullmatch(r"[0-9]{10}", normalized):
-            raise ValueError("Phone number must contain exactly 10 digits")
+            raise ValueError(
+                "Phone number must contain exactly 10 digits"
+            )
 
         return normalized
 
@@ -72,10 +115,8 @@ class OrderCreate(BaseModel):
                 return None
         return value
 
-    
     @model_validator(mode="after")
     def validate_order_details(self):
-        # Validate delivery address
         if self.delivery_type == "delivery":
             if self.address_id is None and not self.delivery_address:
                 raise ValueError(
@@ -85,9 +126,10 @@ class OrderCreate(BaseModel):
         if self.delivery_type == "pickup":
             self.delivery_address = None
 
-        # Prevent duplicate products when items are provided
         if self.items:
-            product_ids = [item.product_id for item in self.items]
+            product_ids = [
+                item.product_id for item in self.items
+            ]
 
             if len(product_ids) != len(set(product_ids)):
                 raise ValueError(
@@ -101,8 +143,16 @@ class OrderItemResponse(BaseModel):
     id: int
     product_id: Optional[int]
     product_name: str
+
+    unit: str
     unit_price: Decimal
-    quantity: int
+    quantity: Decimal
+
+    stock_deduction_quantity: int
+
+    purchase_mode: PurchaseMode
+    purchase_amount: Optional[Decimal] = None
+
     line_total: Decimal
 
     model_config = ConfigDict(from_attributes=True)
@@ -144,6 +194,7 @@ class OrderStatusUpdate(BaseModel):
         "completed",
         "cancelled"
     ]
+
 
 class PaymentStatusUpdate(BaseModel):
     payment_status: Literal[

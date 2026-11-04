@@ -75,6 +75,15 @@ class StoreSettingUpdate(BaseModel):
         decimal_places=2
     )
 
+    @model_validator(mode="after")
+    def validate_store_hours(self):
+        if self.opening_time is not None and self.closing_time is not None:
+            if self.closing_time <= self.opening_time:
+                raise ValueError(
+                    "Closing time must be later than opening time"
+                )
+
+        return self
 
 class StoreSettingResponse(BaseModel):
     id: int

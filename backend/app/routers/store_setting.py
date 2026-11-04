@@ -90,6 +90,15 @@ def update_store_settings(
         "closing_time", settings.closing_time
     )
 
+    if (
+        ("opening_time" in update_data and new_opening_time is None)
+        or ("closing_time" in update_data and new_closing_time is None)
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Opening time and closing time cannot be null"
+        )
+
     if new_closing_time <= new_opening_time:
         raise HTTPException(
             status_code=400,

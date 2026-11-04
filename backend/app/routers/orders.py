@@ -1,9 +1,12 @@
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
-from sqlalchemy import func
-from sqlalchemy import or_
+from sqlalchemy import func, or_
+from decimal import Decimal, ROUND_HALF_UP, ROUND_CEILING, ROUND_DOWN
 from uuid import uuid4
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
+from typing import Optional
 
 from app.database import get_db
 from app.models.order import Order
@@ -11,15 +14,17 @@ from app.models.order_item import OrderItem
 from app.models.product import Product
 from app.models.user import User
 from app.models.coupon import Coupon
-from app.schemas.order import OrderCreate, OrderResponse, OrderStatusUpdate
-from app.routers.auth import get_current_user, require_admin
 from app.models.store_setting import StoreSetting
-from typing import Optional
-from datetime import datetime, timezone
-from decimal import Decimal, ROUND_HALF_UP
-from zoneinfo import ZoneInfo
 from app.models.address import Address
 from app.models.cart import Cart, CartItem
+
+from app.schemas.order import (
+    OrderCreate,
+    OrderResponse,
+    OrderStatusUpdate
+)
+
+from app.routers.auth import get_current_user, require_admin
 from app.services.notification_service import create_notification
 
 
@@ -27,6 +32,15 @@ router = APIRouter(
     prefix="/orders",
     tags=["Orders"]
 )
+
+
+TWO_DECIMALS = Decimal("0.01")
+QUANTITY_PRECISION = Decimal("0.000000000001")
+
+DISCRETE_UNITS = {"piece", "packet", "bottle"}
+MEASUREMENT_UNITS = {"kg", "g", "litre", "ml"}
+
+
 def notify_all_admins(
     db: Session,
     title: str,
@@ -49,15 +63,82 @@ def notify_all_admins(
             order_id=order_id
         )
 
+
+def get_discounted_unit_price(product: Product) -> Decimal:
+    price = Decimal(str(product.price))
+    discount = Decimal(str(product.discount_percentage or 0))
+
+    return (
+        price * (Decimal("1") - discount / Decimal("100"))
+    ).quantize(
+        TWO_DECIMALS,
+        rounding=ROUND_HALF_UP
+    )
+
+
+def calculate_quantity_from_amount(
+    amount: Decimal,
+    unit_price: Decimal
+) -> Decimal:
+    if unit_price <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Amount-based purchasing is unavailable for this product"
+        )
+
+    quantity = (amount / unit_price).quantize(
+        QUANTITY_PRECISION,
+        rounding=ROUND_DOWN
+    )
+
+    if quantity <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Entered amount is too small to purchase this product"
+        )
+
+    return quantity
+
+
+def validate_purchase_quantity(
+    product: Product,
+    quantity: Decimal
+):
+    unit = product.unit
+
+    if unit in DISCRETE_UNITS:
+        if quantity != quantity.to_integral_value():
+            raise HTTPException(
+                status_code=400,
+                detail=f"{product.name} must be purchased in whole {unit} units"
+            )
+
+    elif unit not in MEASUREMENT_UNITS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported selling unit for {product.name}"
+        )
+
+
+def calculate_stock_deduction(quantity: Decimal) -> int:
+    return int(
+        quantity.to_integral_value(rounding=ROUND_CEILING)
+    )
+
+
 # CUSTOMER: Place an order
-@router.post("/", response_model=OrderResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/",
+    response_model=OrderResponse,
+    status_code=status.HTTP_201_CREATED
+)
 def create_order(
     order_data: OrderCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
     try:
-        # Get store settings for delivery fee
+        # Store settings
         store_settings = db.query(StoreSetting).first()
 
         if not store_settings:
@@ -66,7 +147,7 @@ def create_order(
                 detail="Store settings are not configured"
             )
 
-        # Check whether online payments are enabled
+        # Online payment availability
         if (
             order_data.payment_method == "online"
             and not store_settings.online_payment_enabled
@@ -76,14 +157,13 @@ def create_order(
                 detail="Online payments are currently unavailable. Please choose Cash on Delivery."
             )
 
-        # Check whether the store is manually closed
+        # Store availability
         if not store_settings.is_open:
             raise HTTPException(
                 status_code=400,
                 detail="The store is currently closed"
             )
 
-        # Check store operating hours (Indian Standard Time)
         current_time = datetime.now(
             ZoneInfo("Asia/Kolkata")
         ).time().replace(tzinfo=None)
@@ -98,15 +178,13 @@ def create_order(
                 detail="Orders can only be placed during store operating hours"
             )
 
-        
-        # Validate delivery address
+        # Delivery address validation
         delivery_address_snapshot = None
         order_phone = order_data.customer_phone
 
         if order_data.delivery_type == "delivery":
 
             if order_data.address_id is not None:
-
                 saved_address = db.query(Address).filter(
                     Address.id == order_data.address_id,
                     Address.user_id == current_user.id
@@ -129,9 +207,10 @@ def create_order(
                     f"{saved_address.pincode}"
                 )
 
-            elif order_data.delivery_address and order_data.delivery_address.strip():
-
-                delivery_address_snapshot = order_data.delivery_address.strip()
+            elif order_data.delivery_address:
+                delivery_address_snapshot = (
+                    order_data.delivery_address.strip()
+                )
 
             else:
                 raise HTTPException(
@@ -153,10 +232,7 @@ def create_order(
                     detail="Phone number must contain exactly 10 digits"
                 )
 
-        subtotal = Decimal("0.00")
-        order_items = []
-
-        # Get the customer's saved cart and lock it
+        # Get and lock customer's cart
         cart = (
             db.query(Cart)
             .filter(Cart.user_id == current_user.id)
@@ -170,7 +246,6 @@ def create_order(
                 detail="Your cart is empty"
             )
 
-        # Lock cart items during checkout
         cart_items = (
             db.query(CartItem)
             .filter(CartItem.cart_id == cart.id)
@@ -184,12 +259,15 @@ def create_order(
                 detail="Your cart is empty"
             )
 
-        # Validate products and calculate totals
-        for item in cart_items:
+        subtotal = Decimal("0.00")
+        order_items = []
+
+        # Validate products and calculate order totals
+        for cart_item in cart_items:
 
             product = (
                 db.query(Product)
-                .filter(Product.id == item.product_id)
+                .filter(Product.id == cart_item.product_id)
                 .with_for_update()
                 .first()
             )
@@ -197,7 +275,7 @@ def create_order(
             if not product:
                 raise HTTPException(
                     status_code=404,
-                    detail=f"Product ID {item.product_id} not found"
+                    detail=f"Product ID {cart_item.product_id} not found"
                 )
 
             if not product.is_available:
@@ -205,61 +283,123 @@ def create_order(
                     status_code=400,
                     detail=f"{product.name} is unavailable"
                 )
-
-            if product.stock < item.quantity:
+            if (
+                product.expiry_date is not None
+                and product.expiry_date < datetime.now(
+                    ZoneInfo("Asia/Kolkata")
+                ).date()
+            ):
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Insufficient stock for {product.name}"
+                    detail=f"{product.name} has expired and cannot be purchased"
+                )
+            
+
+            unit_price = get_discounted_unit_price(product)
+
+            purchase_mode = cart_item.purchase_mode or "quantity"
+            purchase_amount = cart_item.purchase_amount
+
+            # Recalculate quantity using the current price
+            if purchase_mode == "amount":
+
+                if product.unit not in MEASUREMENT_UNITS:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Amount-based purchasing is not supported for {product.name}"
+                    )
+
+                if purchase_amount is None:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Purchase amount is missing for {product.name}"
+                    )
+
+                purchase_amount = Decimal(str(purchase_amount))
+
+                quantity = calculate_quantity_from_amount(
+                    purchase_amount,
+                    unit_price
                 )
 
-            # Calculate discounted price
-            original_price = Decimal(str(product.price))
-            discount = Decimal(str(product.discount_percentage or 0))
+                line_total = purchase_amount
 
-            unit_price = (
-                original_price *
-                (Decimal("1") - discount / Decimal("100"))
-            ).quantize(
-                Decimal("0.01"),
-                rounding=ROUND_HALF_UP
-            )
+            elif purchase_mode == "quantity":
 
-            line_total = (
-                unit_price * item.quantity
-            ).quantize(
-                Decimal("0.01"),
-                rounding=ROUND_HALF_UP
-            )
+                quantity = Decimal(str(cart_item.quantity))
 
+                if quantity <= 0:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Invalid quantity for {product.name}"
+                    )
+
+                line_total = (
+                    unit_price * quantity
+                ).quantize(
+                    TWO_DECIMALS,
+                    rounding=ROUND_HALF_UP
+                )
+
+            else:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid purchase mode for {product.name}"
+                )
+
+            validate_purchase_quantity(product, quantity)
+
+            # Calculate whole-unit stock deduction
+            stock_deduction = calculate_stock_deduction(quantity)
+
+            if product.stock < stock_deduction:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Insufficient stock for {product.name}. Available stock: {product.stock} {product.unit}"
+                )
+
+            # Calculate total
             subtotal += line_total
 
+            # Deduct stock
+            product.stock -= stock_deduction
+
+            # Save order item information
             order_items.append({
                 "product": product,
                 "product_name": product.name,
+                "unit": product.unit,
                 "unit_price": unit_price,
-                "quantity": item.quantity,
+                "quantity": quantity,
+                "stock_deduction_quantity": stock_deduction,
+                "purchase_mode": purchase_mode,
+                "purchase_amount": purchase_amount,
                 "line_total": line_total
             })
 
-            # Deduct stock
-            product.stock -= item.quantity
+        subtotal = subtotal.quantize(
+            TWO_DECIMALS,
+            rounding=ROUND_HALF_UP
+        )
 
-
-        # Calculate delivery fee
+        # Delivery fee
         if order_data.delivery_type == "delivery":
-            delivery_fee = Decimal(str(store_settings.delivery_fee))
+            delivery_fee = Decimal(
+                str(store_settings.delivery_fee)
+            ).quantize(TWO_DECIMALS)
         else:
             delivery_fee = Decimal("0.00")
 
-
-        # Calculate coupon discount
+        # Coupon validation
         coupon = None
         coupon_discount = Decimal("0.00")
         coupon_code = None
 
         if order_data.coupon_code:
 
-            normalized_code = order_data.coupon_code.strip().upper()
+            normalized_code = (
+                order_data.coupon_code.strip().upper()
+            )
 
             coupon = (
                 db.query(Coupon)
@@ -280,10 +420,14 @@ def create_order(
             expiry_date = coupon.expiry_date
 
             if start_date.tzinfo is None:
-                start_date = start_date.replace(tzinfo=timezone.utc)
+                start_date = start_date.replace(
+                    tzinfo=timezone.utc
+                )
 
             if expiry_date.tzinfo is None:
-                expiry_date = expiry_date.replace(tzinfo=timezone.utc)
+                expiry_date = expiry_date.replace(
+                    tzinfo=timezone.utc
+                )
 
             if now < start_date or now >= expiry_date:
                 raise HTTPException(
@@ -309,7 +453,9 @@ def create_order(
             if coupon.discount_type == "percentage":
 
                 coupon_discount = (
-                    subtotal * coupon.discount_value / Decimal("100")
+                    subtotal
+                    * coupon.discount_value
+                    / Decimal("100")
                 )
 
                 if coupon.max_discount_amount is not None:
@@ -325,14 +471,19 @@ def create_order(
                 coupon_discount,
                 subtotal
             ).quantize(
-                Decimal("0.01"),
+                TWO_DECIMALS,
                 rounding=ROUND_HALF_UP
             )
 
             coupon_code = coupon.code
 
-        # Calculate final order amount
-        total_amount = subtotal + delivery_fee - coupon_discount
+        # Final amount
+        total_amount = (
+            subtotal + delivery_fee - coupon_discount
+        ).quantize(
+            TWO_DECIMALS,
+            rounding=ROUND_HALF_UP
+        )
 
         if total_amount < Decimal("0.00"):
             raise HTTPException(
@@ -340,14 +491,11 @@ def create_order(
                 detail="Invalid order total"
             )
 
-        # Record successful coupon usage
+        # Record coupon usage
         if coupon:
             coupon.usage_count += 1
 
-
-        
-
-        # Create main order
+        # Create order
         new_order = Order(
             order_number=str(uuid4()),
             customer_id=current_user.id,
@@ -368,26 +516,32 @@ def create_order(
         db.add(new_order)
         db.flush()
 
-        # Save individual order items
+        # Save order items
         for item in order_items:
+
             order_item = OrderItem(
                 order_id=new_order.id,
                 product_id=item["product"].id,
                 product_name=item["product_name"],
+                unit=item["unit"],
                 unit_price=item["unit_price"],
                 quantity=item["quantity"],
+                stock_deduction_quantity=item[
+                    "stock_deduction_quantity"
+                ],
+                purchase_mode=item["purchase_mode"],
+                purchase_amount=item["purchase_amount"],
                 line_total=item["line_total"]
             )
 
             db.add(order_item)
 
-        # Clear cart after creating order
+        # Clear cart within the same transaction
         db.query(CartItem).filter(
             CartItem.cart_id == cart.id
         ).delete(synchronize_session=False)
 
-
-        # Notify customer
+        # Customer notification
         create_notification(
             db=db,
             user_id=current_user.id,
@@ -397,7 +551,7 @@ def create_order(
             order_id=new_order.id
         )
 
-        # Notify all active admins
+        # Admin notifications
         notify_all_admins(
             db=db,
             title="New order received!",
@@ -423,7 +577,7 @@ def create_order(
         )
 
 
-
+# ADMIN: Search orders
 @router.get("/admin/search", response_model=list[OrderResponse])
 def search_orders(
     keyword: str,
@@ -438,8 +592,6 @@ def search_orders(
             detail="Search keyword cannot be empty"
         )
 
-    query = db.query(Order)
-
     filters = [
         Order.order_number.ilike(f"%{keyword}%"),
         Order.customer_phone.ilike(f"%{keyword}%")
@@ -448,16 +600,14 @@ def search_orders(
     if keyword.isdigit():
         filters.append(Order.customer_id == int(keyword))
 
-    orders = query.filter(
+    return db.query(Order).filter(
         or_(*filters)
     ).order_by(
         Order.created_at.desc()
     ).limit(100).all()
 
-    return orders
 
-
-
+# CUSTOMER: Own order summary
 @router.get("/my-orders/summary")
 def get_my_order_summary(
     db: Session = Depends(get_db),
@@ -467,38 +617,26 @@ def get_my_order_summary(
         Order.customer_id == current_user.id
     )
 
-    total_orders = customer_orders.count()
-
-    pending_orders = customer_orders.filter(
-        Order.order_status == "pending"
-    ).count()
-
-    active_orders = customer_orders.filter(
-        Order.order_status.in_([
-            "confirmed",
-            "preparing",
-            "ready_for_pickup",
-            "out_for_delivery"
-        ])
-    ).count()
-
-    completed_orders = customer_orders.filter(
-        Order.order_status == "completed"
-    ).count()
-
-    cancelled_orders = customer_orders.filter(
-        Order.order_status == "cancelled"
-    ).count()
-
     return {
-        "total_orders": total_orders,
-        "pending_orders": pending_orders,
-        "active_orders": active_orders,
-        "completed_orders": completed_orders,
-        "cancelled_orders": cancelled_orders
+        "total_orders": customer_orders.count(),
+        "pending_orders": customer_orders.filter(
+            Order.order_status == "pending"
+        ).count(),
+        "active_orders": customer_orders.filter(
+            Order.order_status.in_([
+                "confirmed",
+                "preparing",
+                "ready_for_pickup",
+                "out_for_delivery"
+            ])
+        ).count(),
+        "completed_orders": customer_orders.filter(
+            Order.order_status == "completed"
+        ).count(),
+        "cancelled_orders": customer_orders.filter(
+            Order.order_status == "cancelled"
+        ).count()
     }
-
-
 
 
 # CUSTOMER: View own orders
@@ -511,7 +649,10 @@ def get_my_orders(
     current_user: User = Depends(get_current_user)
 ):
     if skip < 0:
-        raise HTTPException(status_code=400, detail="Skip cannot be negative")
+        raise HTTPException(
+            status_code=400,
+            detail="Skip cannot be negative"
+        )
 
     if limit < 1 or limit > 100:
         raise HTTPException(
@@ -540,7 +681,9 @@ def get_my_orders(
                 detail="Invalid order status"
             )
 
-        query = query.filter(Order.order_status == order_status)
+        query = query.filter(
+            Order.order_status == order_status
+        )
 
     return query.order_by(
         Order.created_at.desc()
@@ -548,7 +691,6 @@ def get_my_orders(
 
 
 # ADMIN: View all orders
-
 @router.get("/admin/all", response_model=list[OrderResponse])
 def get_all_orders(
     skip: int = 0,
@@ -560,38 +702,100 @@ def get_all_orders(
     admin: User = Depends(require_admin)
 ):
     if skip < 0:
-        raise HTTPException(status_code=400, detail="Skip cannot be negative")
+        raise HTTPException(
+            status_code=400,
+            detail="Skip cannot be negative"
+        )
 
     if limit < 1 or limit > 100:
-        raise HTTPException(status_code=400, detail="Limit must be between 1 and 100")
+        raise HTTPException(
+            status_code=400,
+            detail="Limit must be between 1 and 100"
+        )
 
     query = db.query(Order)
 
     if order_status:
         allowed_statuses = [
-            "pending", "confirmed", "preparing",
-            "ready_for_pickup", "out_for_delivery",
-            "completed", "cancelled"
+            "pending",
+            "confirmed",
+            "preparing",
+            "ready_for_pickup",
+            "out_for_delivery",
+            "completed",
+            "cancelled"
         ]
+
         if order_status not in allowed_statuses:
-            raise HTTPException(status_code=400, detail="Invalid order status")
-        query = query.filter(Order.order_status == order_status)
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid order status"
+            )
+
+        query = query.filter(
+            Order.order_status == order_status
+        )
 
     if payment_status:
-        allowed_payments = ["pending", "paid", "failed", "refunded"]
+        allowed_payments = [
+            "pending",
+            "paid",
+            "failed",
+            "refunded"
+        ]
+
         if payment_status not in allowed_payments:
-            raise HTTPException(status_code=400, detail="Invalid payment status")
-        query = query.filter(Order.payment_status == payment_status)
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid payment status"
+            )
+
+        query = query.filter(
+            Order.payment_status == payment_status
+        )
 
     if delivery_type:
         if delivery_type not in ["pickup", "delivery"]:
-            raise HTTPException(status_code=400, detail="Invalid delivery type")
-        query = query.filter(Order.delivery_type == delivery_type)
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid delivery type"
+            )
+
+        query = query.filter(
+            Order.delivery_type == delivery_type
+        )
 
     return query.order_by(
         Order.created_at.desc()
     ).offset(skip).limit(limit).all()
 
+
+def restore_order_stock(db: Session, order: Order):
+    for item in order.items:
+
+        if item.product_id is None:
+            continue
+
+        product = (
+            db.query(Product)
+            .filter(Product.id == item.product_id)
+            .with_for_update()
+            .first()
+        )
+
+        if product:
+            # Restore exactly what was deducted at checkout
+            deduction = item.stock_deduction_quantity
+
+            # Fallback for legacy order records before migration
+            if deduction is None:
+                deduction = int(
+                    Decimal(str(item.quantity)).to_integral_value(
+                        rounding=ROUND_CEILING
+                    )
+                )
+
+            product.stock += deduction
 
 
 # CUSTOMER: Cancel own pending order
@@ -630,22 +834,10 @@ def cancel_my_order(
         )
 
     try:
-        # Restore product stock
-        for item in order.items:
-            if item.product_id is not None:
-                product = (
-                    db.query(Product)
-                    .filter(Product.id == item.product_id)
-                    .with_for_update()
-                    .first()
-                )
-
-                if product:
-                    product.stock += item.quantity
+        restore_order_stock(db, order)
 
         order.order_status = "cancelled"
 
-        # Notify customer
         create_notification(
             db=db,
             user_id=current_user.id,
@@ -655,7 +847,6 @@ def cancel_my_order(
             order_id=order.id
         )
 
-        # Notify admins
         notify_all_admins(
             db=db,
             title="Order cancellation",
@@ -675,8 +866,6 @@ def cancel_my_order(
             status_code=500,
             detail="Could not cancel order"
         )
-
-
 
 
 # ADMIN: Update order status
@@ -703,7 +892,11 @@ def update_order_status(
     allowed_transitions = {
         "pending": ["confirmed", "cancelled"],
         "confirmed": ["preparing", "cancelled"],
-        "preparing": ["ready_for_pickup", "out_for_delivery", "cancelled"],
+        "preparing": [
+            "ready_for_pickup",
+            "out_for_delivery",
+            "cancelled"
+        ],
         "ready_for_pickup": ["completed", "cancelled"],
         "out_for_delivery": ["completed"]
     }
@@ -711,50 +904,47 @@ def update_order_status(
     new_status = status_data.order_status
     current_status = order.order_status
 
-    if new_status not in allowed_transitions.get(current_status, []):
+    if new_status not in allowed_transitions.get(
+        current_status, []
+    ):
         raise HTTPException(
             status_code=400,
             detail=f"Cannot change order status from {current_status} to {new_status}"
         )
 
-    # Validate delivery-specific statuses
-    if new_status == "ready_for_pickup" and order.delivery_type != "pickup":
+    if (
+        new_status == "ready_for_pickup"
+        and order.delivery_type != "pickup"
+    ):
         raise HTTPException(
             status_code=400,
             detail="Only pickup orders can be marked ready for pickup"
         )
 
-    if new_status == "out_for_delivery" and order.delivery_type != "delivery":
+    if (
+        new_status == "out_for_delivery"
+        and order.delivery_type != "delivery"
+    ):
         raise HTTPException(
             status_code=400,
             detail="Only delivery orders can be marked out for delivery"
         )
 
-    # Paid orders must be refunded before cancellation
-    if new_status == "cancelled" and order.payment_status == "paid":
+    if (
+        new_status == "cancelled"
+        and order.payment_status == "paid"
+    ):
         raise HTTPException(
             status_code=400,
             detail="Refund the payment before cancelling this order"
         )
 
     try:
-        # Restore stock when admin cancels an order
         if new_status == "cancelled":
-            for item in order.items:
-                if item.product_id is not None:
-                    product = (
-                        db.query(Product)
-                        .filter(Product.id == item.product_id)
-                        .with_for_update()
-                        .first()
-                    )
-
-                    if product:
-                        product.stock += item.quantity
+            restore_order_stock(db, order)
 
         order.order_status = new_status
 
-        # Notify customer about order status
         status_messages = {
             "confirmed": "Your order has been confirmed.",
             "preparing": "Your order is being prepared.",
@@ -789,7 +979,7 @@ def update_order_status(
         )
 
 
-
+# ADMIN: Order summary
 @router.get("/admin/summary")
 def get_order_summary(
     db: Session = Depends(get_db),
@@ -818,7 +1008,10 @@ def get_order_summary(
     ).count()
 
     total_revenue = db.query(
-        func.coalesce(func.sum(Order.total_amount), 0)
+        func.coalesce(
+            func.sum(Order.total_amount),
+            0
+        )
     ).filter(
         Order.payment_status == "paid"
     ).scalar()
@@ -834,6 +1027,7 @@ def get_order_summary(
     }
 
 
+# ADMIN: View one order
 @router.get("/admin/{order_id}", response_model=OrderResponse)
 def get_admin_order(
     order_id: int,
@@ -870,7 +1064,9 @@ def get_my_order(
     )
 
     if not order:
-        raise HTTPException(status_code=404, detail="Order not found")
+        raise HTTPException(
+            status_code=404,
+            detail="Order not found"
+        )
 
     return order
-

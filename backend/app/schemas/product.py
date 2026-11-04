@@ -1,42 +1,214 @@
-from pydantic import BaseModel, ConfigDict, computed_field, Field, field_validator, HttpUrl
-from typing import Optional
+
+from decimal import Decimal, ROUND_HALF_UP
+from datetime import date
+from typing import Optional, Literal
+
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    computed_field,
+    field_validator,
+    model_validator,
+    TypeAdapter,
+    HttpUrl
+)
+
+
+# Supported product selling units
+ProductUnit = Literal[
+    "piece",
+    "packet",
+    "bottle",
+    "kg",
+    "g",
+    "litre",
+    "ml"
+]
+
+# Validate image URLs but store them as strings
+url_adapter = TypeAdapter(HttpUrl)
+
+
+# Common text cleaning
+def clean_text(value):
+    if value is None:
+        return value
+
+    value = value.strip()
+
+    return value if value else None
 
 
 # Used when adding a product
 class ProductCreate(BaseModel):
+
+    # Basic information
     name: str = Field(..., min_length=2, max_length=150)
     description: Optional[str] = None
-    price: float = Field(..., gt=0)
-    stock: int = Field(default=0, ge=0)
+    brand: Optional[str] = Field(default=None, max_length=100)
     category: str = Field(..., min_length=2, max_length=100)
-    image_url: Optional[HttpUrl] = None
-    discount_percentage: float = Field(default=0, ge=0, le=100)
 
-    @field_validator("name", "category", "description")
+    # Identification
+    sku: Optional[str] = Field(default=None, max_length=100)
+    barcode: Optional[str] = Field(default=None, max_length=100)
+
+    # Pricing
+    price: Decimal = Field(..., gt=0, max_digits=10, decimal_places=2)
+    mrp: Optional[Decimal] = Field(
+        default=None, gt=0, max_digits=10, decimal_places=2
+    )
+    cost_price: Optional[Decimal] = Field(
+        default=None, ge=0, max_digits=10, decimal_places=2
+    )
+
+    discount_percentage: Decimal = Field(
+        default=Decimal("0"),
+        ge=0,
+        le=100,
+        max_digits=5,
+        decimal_places=2
+    )
+
+    # Selling unit
+    unit: ProductUnit = "piece"
+
+    # Inventory
+    stock: int = Field(default=0, ge=0)
+    low_stock_threshold: Optional[int] = Field(default=None, ge=0)
+
+    # Additional information
+    image_url: Optional[str] = None
+    expiry_date: Optional[date] = None
+
+    @field_validator(
+        "name", "category", "description", "brand", "sku", "barcode"
+    )
     @classmethod
-    def remove_extra_spaces(cls, value: str) -> str:
-        if value is not None:
-            return value.strip()
-        return value
+    def clean_text_fields(cls, value):
+        return clean_text(value)
+
+    @field_validator("image_url")
+    @classmethod
+    def validate_image_url(cls, value):
+        if value is None:
+            return None
+
+        return str(url_adapter.validate_python(value))
+
+    @model_validator(mode="after")
+    def validate_prices(self):
+        if self.mrp is not None and self.price > self.mrp:
+            raise ValueError("Selling price cannot be greater than MRP")
+
+        return self
+
+
+# Used when updating a product
+class ProductUpdate(BaseModel):
+
+    name: Optional[str] = Field(default=None, min_length=2, max_length=150)
+    description: Optional[str] = None
+    brand: Optional[str] = Field(default=None, max_length=100)
+    category: Optional[str] = Field(
+        default=None, min_length=2, max_length=100
+    )
+
+    sku: Optional[str] = Field(default=None, max_length=100)
+    barcode: Optional[str] = Field(default=None, max_length=100)
+
+    price: Optional[Decimal] = Field(
+        default=None, gt=0, max_digits=10, decimal_places=2
+    )
+    mrp: Optional[Decimal] = Field(
+        default=None, gt=0, max_digits=10, decimal_places=2
+    )
+    cost_price: Optional[Decimal] = Field(
+        default=None, ge=0, max_digits=10, decimal_places=2
+    )
+
+    discount_percentage: Optional[Decimal] = Field(
+        default=None,
+        ge=0,
+        le=100,
+        max_digits=5,
+        decimal_places=2
+    )
+
+    unit: Optional[ProductUnit] = None
+
+    stock: Optional[int] = Field(default=None, ge=0)
+    low_stock_threshold: Optional[int] = Field(default=None, ge=0)
+
+    image_url: Optional[str] = None
+    expiry_date: Optional[date] = None
+    is_available: Optional[bool] = None
+
+    @field_validator(
+        "name", "category", "description", "brand", "sku", "barcode"
+    )
+    @classmethod
+    def clean_text_fields(cls, value):
+        return clean_text(value)
+
+    @field_validator("image_url")
+    @classmethod
+    def validate_image_url(cls, value):
+        if value is None:
+            return None
+
+        return str(url_adapter.validate_python(value))
+
+    @model_validator(mode="after")
+    def validate_prices(self):
+        if (
+            self.mrp is not None
+            and self.price is not None
+            and self.price > self.mrp
+        ):
+            raise ValueError("Selling price cannot be greater than MRP")
+
+        return self
 
 
 # Used when returning product details
 class ProductResponse(BaseModel):
+
     id: int
+
     name: str
-    description: Optional[str]
-    price: float
-    stock: int
+    description: Optional[str] = None
+    brand: Optional[str] = None
     category: str
-    image_url: Optional[HttpUrl]
+
+    sku: Optional[str] = None
+    barcode: Optional[str] = None
+
+    price: Decimal
+    mrp: Optional[Decimal] = None
+    cost_price: Optional[Decimal] = None
+    discount_percentage: Decimal
+
+    unit: str
+
+    stock: int
+    low_stock_threshold: Optional[int] = None
+
+    image_url: Optional[str] = None
+    expiry_date: Optional[date] = None
+
     is_available: bool
-    discount_percentage: float
 
     model_config = ConfigDict(from_attributes=True)
 
     @computed_field
     @property
-    def discounted_price(self) -> float:
-        return round(
-            self.price * (1 - self.discount_percentage / 100), 2
+    def discounted_price(self) -> Decimal:
+        discount = Decimal("1") - (
+            self.discount_percentage / Decimal("100")
+        )
+
+        return (self.price * discount).quantize(
+            Decimal("0.01"),
+            rounding=ROUND_HALF_UP
         )

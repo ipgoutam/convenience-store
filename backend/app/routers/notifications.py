@@ -1,5 +1,5 @@
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 
@@ -12,27 +12,32 @@ from app.schemas.notification import (
 )
 from app.routers.auth import get_current_user
 
+
 router = APIRouter(
     prefix="/notifications",
     tags=["Notifications"]
 )
 
 
-# Get all notifications
+# CUSTOMER: Get notifications
 @router.get("/", response_model=list[NotificationResponse])
 def get_notifications(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(20, ge=1, le=100)
 ):
     return (
         db.query(Notification)
         .filter(Notification.user_id == current_user.id)
         .order_by(Notification.created_at.desc())
+        .offset(skip)
+        .limit(limit)
         .all()
     )
 
 
-# Get notification counts
+# CUSTOMER: Get notification counts
 @router.get("/count", response_model=NotificationCount)
 def get_notification_count(
     db: Session = Depends(get_db),
@@ -48,7 +53,7 @@ def get_notification_count(
         db.query(func.count(Notification.id))
         .filter(
             Notification.user_id == current_user.id,
-            Notification.is_read == False
+            Notification.is_read.is_(False)
         )
         .scalar() or 0
     )
@@ -59,7 +64,7 @@ def get_notification_count(
     }
 
 
-# Mark one notification as read
+# CUSTOMER: Mark one notification as read
 @router.patch("/{notification_id}/read")
 def mark_notification_read(
     notification_id: int,
@@ -72,31 +77,64 @@ def mark_notification_read(
     ).first()
 
     if not notification:
-        raise HTTPException(status_code=404, detail="Notification not found")
+        raise HTTPException(
+            status_code=404,
+            detail="Notification not found"
+        )
 
-    notification.is_read = True
-    db.commit()
+    try:
+        notification.is_read = True
+        db.commit()
 
-    return {"message": "Notification marked as read"}
+        return {
+            "message": "Notification marked as read"
+        }
+
+    except Exception:
+        db.rollback()
+
+        raise HTTPException(
+            status_code=500,
+            detail="Could not update notification"
+        )
 
 
-# Mark all notifications as read
+# CUSTOMER: Mark all notifications as read
 @router.patch("/read-all")
 def mark_all_notifications_read(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    db.query(Notification).filter(
-        Notification.user_id == current_user.id,
-        Notification.is_read == False
-    ).update({"is_read": True}, synchronize_session=False)
+    try:
+        updated_count = (
+            db.query(Notification)
+            .filter(
+                Notification.user_id == current_user.id,
+                Notification.is_read.is_(False)
+            )
+            .update(
+                {"is_read": True},
+                synchronize_session=False
+            )
+        )
 
-    db.commit()
+        db.commit()
 
-    return {"message": "All notifications marked as read"}
+        return {
+            "message": "All notifications marked as read",
+            "updated_count": updated_count
+        }
+
+    except Exception:
+        db.rollback()
+
+        raise HTTPException(
+            status_code=500,
+            detail="Could not update notifications"
+        )
 
 
-# Delete one notification
+# CUSTOMER: Delete one notification
 @router.delete("/{notification_id}")
 def delete_notification(
     notification_id: int,
@@ -109,24 +147,52 @@ def delete_notification(
     ).first()
 
     if not notification:
-        raise HTTPException(status_code=404, detail="Notification not found")
+        raise HTTPException(
+            status_code=404,
+            detail="Notification not found"
+        )
 
-    db.delete(notification)
-    db.commit()
+    try:
+        db.delete(notification)
+        db.commit()
 
-    return {"message": "Notification deleted"}
+        return {
+            "message": "Notification deleted successfully"
+        }
+
+    except Exception:
+        db.rollback()
+
+        raise HTTPException(
+            status_code=500,
+            detail="Could not delete notification"
+        )
 
 
-# Delete all notifications
+# CUSTOMER: Delete all notifications
 @router.delete("/")
 def delete_all_notifications(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    db.query(Notification).filter(
-        Notification.user_id == current_user.id
-    ).delete(synchronize_session=False)
+    try:
+        deleted_count = (
+            db.query(Notification)
+            .filter(Notification.user_id == current_user.id)
+            .delete(synchronize_session=False)
+        )
 
-    db.commit()
+        db.commit()
 
-    return {"message": "All notifications deleted"}
+        return {
+            "message": "All notifications deleted",
+            "deleted_count": deleted_count
+        }
+
+    except Exception:
+        db.rollback()
+
+        raise HTTPException(
+            status_code=500,
+            detail="Could not delete notifications"
+        )

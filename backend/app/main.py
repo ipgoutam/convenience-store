@@ -1,5 +1,6 @@
 
 import os
+from contextlib import asynccontextmanager
 from datetime import time
 
 from fastapi import FastAPI, Depends
@@ -9,7 +10,11 @@ from sqlalchemy import text
 
 from app.database import Base, engine, get_db, SessionLocal
 
-# Import all database models
+
+# --------------------------------------------------
+# IMPORT ALL DATABASE MODELS
+# --------------------------------------------------
+
 from app.models.category import Category
 from app.models.product import Product
 from app.models.user import User
@@ -26,7 +31,10 @@ from app.models.admin_invite import AdminInvite
 from app.models.refund_attempt import RefundAttempt
 
 
-# Import routers
+# --------------------------------------------------
+# IMPORT ALL ROUTERS
+# --------------------------------------------------
+
 from app.routers.products import router as products_router
 from app.routers.category import router as category_router
 from app.routers.auth import router as auth_router
@@ -42,11 +50,22 @@ from app.routers.dashboard import router as dashboard_router
 from app.routers.admin_management import router as admin_management_router
 
 
-# Create database tables
-Base.metadata.create_all(bind=engine)
+# --------------------------------------------------
+# UPLOAD DIRECTORY
+# --------------------------------------------------
+
+from pathlib import Path
+
+BACKEND_DIR = Path(__file__).resolve().parent.parent
+UPLOAD_DIR = str(BACKEND_DIR / "uploads")
+
+os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 
-# Initialize default store settings
+# --------------------------------------------------
+# INITIALIZE DEFAULT STORE SETTINGS
+# --------------------------------------------------
+
 def initialize_store_settings():
     db = SessionLocal()
 
@@ -73,20 +92,37 @@ def initialize_store_settings():
         db.close()
 
 
-initialize_store_settings()
+# --------------------------------------------------
+# APPLICATION LIFESPAN
+# --------------------------------------------------
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+
+    # Create tables that do not already exist.
+    Base.metadata.create_all(bind=engine)
+
+    # Initialize default store settings.
+    initialize_store_settings()
+
+    yield
 
 
-# Create FastAPI application
+# --------------------------------------------------
+# CREATE FASTAPI APPLICATION
+# --------------------------------------------------
+
 app = FastAPI(
     title="Convenience Store API",
     description="Backend for our convenience store",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=lifespan
 )
 
 
-# Static image uploads
-UPLOAD_DIR = "uploads"
-os.makedirs(UPLOAD_DIR, exist_ok=True)
+# --------------------------------------------------
+# STATIC IMAGE UPLOADS
+# --------------------------------------------------
 
 app.mount(
     "/uploads",
@@ -95,7 +131,10 @@ app.mount(
 )
 
 
-# Register API routers
+# --------------------------------------------------
+# REGISTER API ROUTERS
+# --------------------------------------------------
+
 app.include_router(products_router)
 app.include_router(category_router)
 app.include_router(auth_router)
@@ -111,6 +150,10 @@ app.include_router(dashboard_router)
 app.include_router(admin_management_router)
 
 
+# --------------------------------------------------
+# HOME ENDPOINT
+# --------------------------------------------------
+
 @app.get("/")
 def home():
     return {
@@ -119,8 +162,13 @@ def home():
     }
 
 
+# --------------------------------------------------
+# DATABASE CONNECTION CHECK
+# --------------------------------------------------
+
 @app.get("/db-check")
 def database_check(db: Session = Depends(get_db)):
+
     db.execute(text("SELECT 1"))
 
     return {

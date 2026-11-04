@@ -45,7 +45,15 @@ def create_order(
                 detail="Store settings are not configured"
             )
 
-
+        # Check whether online payments are enabled
+        if (
+            order_data.payment_method == "online"
+            and not store_settings.online_payment_enabled
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="Online payments are currently unavailable. Please choose Cash on Delivery."
+            )
 
         # Check whether the store is manually closed
         if not store_settings.is_open:

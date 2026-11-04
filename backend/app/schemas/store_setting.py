@@ -1,4 +1,3 @@
-
 from pydantic import BaseModel, Field, ConfigDict, model_validator
 from typing import Optional
 from datetime import time
@@ -27,6 +26,7 @@ class StoreSettingCreate(BaseModel):
     closing_time: time = time(22, 0)
 
     is_open: bool = True
+    online_payment_enabled: bool = False
 
     delivery_fee: Decimal = Field(
         default=Decimal("0.00"),
@@ -34,6 +34,7 @@ class StoreSettingCreate(BaseModel):
         max_digits=10,
         decimal_places=2
     )
+
     @model_validator(mode="after")
     def validate_store_hours(self):
         if self.closing_time <= self.opening_time:
@@ -65,6 +66,7 @@ class StoreSettingUpdate(BaseModel):
     opening_time: Optional[time] = None
     closing_time: Optional[time] = None
     is_open: Optional[bool] = None
+    online_payment_enabled: Optional[bool] = None
 
     delivery_fee: Optional[Decimal] = Field(
         default=None,
@@ -82,6 +84,7 @@ class StoreSettingResponse(BaseModel):
     opening_time: time
     closing_time: time
     is_open: bool
+    online_payment_enabled: bool
     delivery_fee: Decimal
 
     model_config = ConfigDict(from_attributes=True)

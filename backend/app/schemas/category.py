@@ -8,7 +8,16 @@ class CategoryCreate(BaseModel):
     name: str = Field(..., min_length=2, max_length=100)
     description: Optional[str] = None
     image_url: Optional[str] = None
+
     is_active: bool = True
+
+    # Homepage settings
+    show_on_home: bool = True
+    display_order: int = Field(default=0, ge=0)
+
+    # Popular Categories settings
+    show_in_popular: bool = False
+    popular_display_order: int = Field(default=0, ge=0)
 
     @field_validator("name")
     @classmethod
@@ -30,7 +39,16 @@ class CategoryUpdate(BaseModel):
     name: Optional[str] = Field(default=None, min_length=2, max_length=100)
     description: Optional[str] = None
     image_url: Optional[str] = None
+
     is_active: Optional[bool] = None
+
+    # Homepage settings
+    show_on_home: Optional[bool] = None
+    display_order: Optional[int] = Field(default=None, ge=0)
+
+    # Popular Categories settings
+    show_in_popular: Optional[bool] = None
+    popular_display_order: Optional[int] = Field(default=None, ge=0)
 
     @field_validator("name")
     @classmethod
@@ -52,9 +70,17 @@ class CategoryUpdate(BaseModel):
 class CategoryResponse(BaseModel):
     id: int
     name: str
-    description: Optional[str]
-    image_url: Optional[str]
+    description: Optional[str] = None
+    image_url: Optional[str] = None
+
     is_active: bool
+
+    show_on_home: bool
+    display_order: int
+
+    show_in_popular: bool
+    popular_display_order: int
+
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 

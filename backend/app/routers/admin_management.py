@@ -202,7 +202,10 @@ def accept_admin_invite(
             invite_data.password
         ),
         role="admin",
-        is_active=True
+        is_active=True,
+        section_permissions={
+            section: False for section in ADMIN_SECTIONS
+        }
     )
 
     try:
@@ -442,4 +445,75 @@ def revoke_admin_invite(
         raise HTTPException(
             status_code=500,
             detail="Could not revoke invitation"
+        )
+
+# --------------------------------------------------
+# 7. UPDATE ADMIN SECTION PERMISSIONS
+# --------------------------------------------------
+
+ADMIN_SECTIONS = [
+    "dashboard",
+    "products",
+    "inventory",
+    "orders",
+    "settings",
+    "categories",
+    "homepage",
+    "customers",
+    "coupons",
+    "notifications"
+]
+
+
+@router.patch("/admins/{admin_id}/permissions")
+def update_admin_permissions(
+    admin_id: int,
+    permissions: dict[str, bool],
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_super_admin)
+):
+    admin = db.query(User).filter(
+        User.id == admin_id
+    ).with_for_update().first()
+
+    if not admin or admin.role != "admin":
+        raise HTTPException(
+            status_code=404,
+            detail="Admin account not found"
+        )
+
+    invalid_sections = set(permissions.keys()) - set(ADMIN_SECTIONS)
+
+    if invalid_sections:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid sections: {', '.join(invalid_sections)}"
+        )
+
+    try:
+        current_permissions = admin.section_permissions or {}
+
+        updated_permissions = {
+            section: current_permissions.get(section, False)
+            for section in ADMIN_SECTIONS
+        }
+
+        updated_permissions.update(permissions)
+
+        admin.section_permissions = updated_permissions
+
+        db.commit()
+        db.refresh(admin)
+
+        return {
+            "message": "Admin permissions updated successfully",
+            "admin_id": admin.id,
+            "section_permissions": admin.section_permissions
+        }
+
+    except Exception:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail="Could not update admin permissions"
         )

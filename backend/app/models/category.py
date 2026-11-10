@@ -16,6 +16,16 @@ class Category(Base):
 
     is_active = Column(Boolean, default=True, nullable=False)
 
+    # Homepage display controls
+    show_on_home = Column(Boolean, default=True, nullable=False)
+
+    display_order = Column(Integer, default=0, nullable=False)
+
+    # Popular Categories section
+    show_in_popular = Column(Boolean, default=False, nullable=False)
+
+    popular_display_order = Column(Integer, default=0, nullable=False)
+
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     updated_at = Column(

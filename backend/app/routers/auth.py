@@ -1,3 +1,14 @@
+import hmac
+import os
+
+from app.models.password_reset_otp import PasswordResetOTP
+from app.services.notification_service import send_email
+
+from app.schemas.user import (
+    ForgotPasswordRequest,
+    VerifyResetOTPRequest,
+    ResetPasswordRequest
+)
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -24,6 +35,7 @@ from app.auth.security import (
     create_access_token,
     decode_access_token
 )
+from app.models.notification_preference import NotificationPreference
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
@@ -116,6 +128,35 @@ def require_admin(current_user: User = Depends(get_current_user)):
 
     return current_user
 
+# Check access to a specific admin section.
+def require_section_access(section: str):
+
+    def check_permission(
+        current_user: User = Depends(get_current_user)
+    ):
+        # Super Admin always has full access.
+        if current_user.role == "super_admin":
+            return current_user
+
+        # Only normal Admins can use these sections.
+        if current_user.role != "admin":
+            raise HTTPException(
+                status_code=403,
+                detail="Admin access required"
+            )
+
+        # Check permission stored in PostgreSQL.
+        permissions = current_user.section_permissions or {}
+
+        if not permissions.get(section, False):
+            raise HTTPException(
+                status_code=403,
+                detail=f"You do not have permission to access {section}."
+            )
+
+        return current_user
+
+    return check_permission
 
 # Only super admins can manage administrator accounts.
 def require_super_admin(
@@ -130,22 +171,337 @@ def require_super_admin(
     return current_user
 
 
+# --------------------------------------------------
+# PASSWORD RESET OTP CONFIGURATION
+# --------------------------------------------------
+
+OTP_EXPIRE_MINUTES = 5
+OTP_RESEND_COOLDOWN_SECONDS = 60
+OTP_MAX_ATTEMPTS = 5
+
+
+def hash_reset_otp(otp: str) -> str:
+    secret = os.getenv("SECRET_KEY")
+
+    if not secret:
+        raise RuntimeError("SECRET_KEY is not configured.")
+
+    return hmac.new(
+        secret.encode(),
+        otp.encode(),
+        hashlib.sha256
+    ).hexdigest()
+
+
+def get_utc_datetime(value):
+    """Normalize database timestamps for timezone-safe comparison."""
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+
+    return value.astimezone(timezone.utc)
+
+
+# --------------------------------------------------
+# 8. REQUEST PASSWORD RESET OTP
+# --------------------------------------------------
+
+@router.post("/forgot-password")
+def forgot_password(
+    request: ForgotPasswordRequest,
+    db: Session = Depends(get_db)
+):
+    generic_response = {
+        "message": "If an account exists with this email, a password reset OTP will be sent."
+    }
+
+    email = str(request.email).strip().lower()
+
+    user = db.query(User).filter(
+        User.email == email,
+        User.is_active == True
+    ).first()
+
+    # Do not reveal whether an account exists.
+    if not user:
+        return generic_response
+
+    now = datetime.now(timezone.utc)
+
+    latest_otp = db.query(PasswordResetOTP).filter(
+        PasswordResetOTP.user_id == user.id
+    ).order_by(
+        PasswordResetOTP.created_at.desc(),
+        PasswordResetOTP.id.desc()
+    ).first()
+
+    # Enforce resend cooldown.
+    if latest_otp:
+        last_sent = get_utc_datetime(latest_otp.last_sent_at)
+
+        elapsed = (now - last_sent).total_seconds()
+
+        if elapsed < OTP_RESEND_COOLDOWN_SECONDS:
+            return generic_response
+
+    try:
+        # Invalidate all previous reset OTP records.
+        db.query(PasswordResetOTP).filter(
+            PasswordResetOTP.user_id == user.id,
+            PasswordResetOTP.used_at.is_(None)
+        ).update({
+            PasswordResetOTP.used_at: now
+        }, synchronize_session=False)
+
+        # Generate a cryptographically secure six-digit OTP.
+        otp = f"{secrets.randbelow(1_000_000):06d}"
+
+        otp_record = PasswordResetOTP(
+            user_id=user.id,
+            otp_hash=hash_reset_otp(otp),
+            attempts=0,
+            expires_at=now + timedelta(
+                minutes=OTP_EXPIRE_MINUTES
+            ),
+            last_sent_at=now
+        )
+
+        db.add(otp_record)
+        db.commit()
+        db.refresh(otp_record)
+
+        try:
+            send_email(
+                recipient=user.email,
+                title="G-MART Password Reset OTP",
+                message=(
+                    f"Your G-MART password reset OTP is: {otp}\n\n"
+                    f"This OTP expires in {OTP_EXPIRE_MINUTES} minutes.\n"
+                    "Do not share this OTP with anyone.\n\n"
+                    "If you did not request a password reset, "
+                    "please ignore this email."
+                )
+            )
+
+        except Exception:
+            # Invalidate the OTP if email delivery fails.
+            otp_record.used_at = datetime.now(timezone.utc)
+            db.commit()
+
+            raise HTTPException(
+                status_code=503,
+                detail="Unable to send the reset email. Please try again later."
+            )
+
+        return generic_response
+
+    except HTTPException:
+        raise
+
+    except Exception:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail="Could not process the password reset request."
+        )
+
+
+# --------------------------------------------------
+# 9. VERIFY PASSWORD RESET OTP
+# --------------------------------------------------
+
+@router.post("/verify-reset-otp")
+def verify_reset_otp(
+    request: VerifyResetOTPRequest,
+    db: Session = Depends(get_db)
+):
+    email = str(request.email).strip().lower()
+
+    user = db.query(User).filter(
+        User.email == email,
+        User.is_active == True
+    ).first()
+
+    if not user:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid or expired OTP."
+        )
+
+    otp_record = db.query(PasswordResetOTP).filter(
+        PasswordResetOTP.user_id == user.id,
+        PasswordResetOTP.used_at.is_(None)
+    ).order_by(
+        PasswordResetOTP.created_at.desc(),
+        PasswordResetOTP.id.desc()
+    ).with_for_update().first()
+
+    if not otp_record:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid or expired OTP."
+        )
+
+    now = datetime.now(timezone.utc)
+
+    if get_utc_datetime(otp_record.expires_at) <= now:
+        otp_record.used_at = now
+        db.commit()
+
+        raise HTTPException(
+            status_code=400,
+            detail="OTP has expired. Please request a new one."
+        )
+
+    if otp_record.attempts >= OTP_MAX_ATTEMPTS:
+        otp_record.used_at = now
+        db.commit()
+
+        raise HTTPException(
+            status_code=400,
+            detail="Maximum OTP attempts exceeded. Request a new OTP."
+        )
+
+    submitted_hash = hash_reset_otp(request.otp)
+
+    if not hmac.compare_digest(
+        otp_record.otp_hash,
+        submitted_hash
+    ):
+        otp_record.attempts += 1
+
+        if otp_record.attempts >= OTP_MAX_ATTEMPTS:
+            otp_record.used_at = now
+
+        db.commit()
+
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid OTP."
+        )
+
+    otp_record.verified_at = now
+    db.commit()
+
+    return {
+        "message": "OTP verified successfully. You can now reset your password."
+    }
+
+
+# --------------------------------------------------
+# 10. RESET PASSWORD
+# --------------------------------------------------
+
+@router.post("/reset-password")
+def reset_password(
+    request: ResetPasswordRequest,
+    db: Session = Depends(get_db)
+):
+    email = str(request.email).strip().lower()
+
+    user = db.query(User).filter(
+        User.email == email,
+        User.is_active == True
+    ).first()
+
+    if not user:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid or expired password reset request."
+        )
+
+    otp_record = db.query(PasswordResetOTP).filter(
+        PasswordResetOTP.user_id == user.id,
+        PasswordResetOTP.used_at.is_(None)
+    ).order_by(
+        PasswordResetOTP.created_at.desc(),
+        PasswordResetOTP.id.desc()
+    ).with_for_update().first()
+
+    if not otp_record:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid or expired password reset request."
+        )
+
+    now = datetime.now(timezone.utc)
+
+    if (
+        otp_record.verified_at is None
+        or get_utc_datetime(otp_record.expires_at) <= now
+        or otp_record.attempts >= OTP_MAX_ATTEMPTS
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Please verify a valid OTP before resetting your password."
+        )
+
+    submitted_hash = hash_reset_otp(request.otp)
+
+    if not hmac.compare_digest(
+        otp_record.otp_hash,
+        submitted_hash
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid password reset OTP."
+        )
+
+    try:
+        # Update the password.
+        user.hashed_password = hash_password(
+            request.new_password
+        )
+
+        # Mark the OTP as used.
+        otp_record.used_at = now
+
+        # Invalidate all active refresh tokens.
+        db.query(RefreshToken).filter(
+            RefreshToken.user_id == user.id,
+            RefreshToken.revoked_at.is_(None)
+        ).update({
+            RefreshToken.revoked_at: now
+        }, synchronize_session=False)
+
+        db.commit()
+
+        return {
+            "message": "Password reset successfully. Please log in with your new password."
+        }
+
+    except Exception:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail="Could not reset your password."
+        )
+
+
 # 1. Customer registration
 @router.post("/register", response_model=UserResponse, status_code=201)
 def register(
     user_data: UserCreate,
     db: Session = Depends(get_db)
 ):
-    existing_user = db.query(User).filter(
-        User.email == str(user_data.email).lower()
-    ).first()
+    normalized_email = (
+        str(user_data.email).lower()
+        if user_data.email
+        else None
+    )
 
-    if existing_user:
-        raise HTTPException(
-            status_code=409,
-            detail="Email already registered"
-        )
+    # Check duplicate email only when provided.
+    if normalized_email:
+        existing_user = db.query(User).filter(
+            User.email == normalized_email
+        ).first()
 
+        if existing_user:
+            raise HTTPException(
+                status_code=409,
+                detail="Email already registered"
+            )
+
+    # Check duplicate phone only when provided.
     if user_data.phone:
         existing_phone = db.query(User).filter(
             User.phone == user_data.phone
@@ -159,7 +515,7 @@ def register(
 
     new_user = User(
         full_name=user_data.full_name.strip(),
-        email=str(user_data.email).lower(),
+        email=normalized_email,
         phone=user_data.phone,
         hashed_password=hash_password(user_data.password),
         role="customer"
@@ -167,8 +523,19 @@ def register(
 
     try:
         db.add(new_user)
+        db.flush()
+
+        preferences = NotificationPreference(
+            user_id=new_user.id,
+            in_app_enabled=True,
+            email_enabled=True,
+            sms_enabled=True
+        )
+
+        db.add(preferences)
         db.commit()
         db.refresh(new_user)
+
     except IntegrityError:
         db.rollback()
         raise HTTPException(
@@ -176,18 +543,29 @@ def register(
             detail="Email or phone number already registered"
         )
 
+    except Exception:
+        db.rollback()
+        raise
+
     return new_user
 
 
-# 2. Login
+# 2. Login using email or phone number
 @router.post("/login")
 def login(
     login_data: UserLogin,
     db: Session = Depends(get_db)
 ):
-    user = db.query(User).filter(
-        User.email == str(login_data.email).lower()
-    ).first()
+    identifier = login_data.identifier.strip()
+
+    if "@" in identifier:
+        user = db.query(User).filter(
+            User.email == identifier.lower()
+        ).first()
+    else:
+        user = db.query(User).filter(
+            User.phone == identifier
+        ).first()
 
     if not user or not verify_password(
         login_data.password,
@@ -195,7 +573,7 @@ def login(
     ):
         raise HTTPException(
             status_code=401,
-            detail="Invalid email or password"
+            detail="Invalid email/phone number or password"
         )
 
     if not user.is_active:
@@ -205,7 +583,6 @@ def login(
         )
 
     return generate_tokens(db, user)
-
 
 # 3. Refresh access token
 @router.post("/refresh")

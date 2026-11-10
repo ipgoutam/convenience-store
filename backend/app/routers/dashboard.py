@@ -14,7 +14,7 @@ from app.models.order_item import OrderItem
 from app.models.product import Product
 from app.models.payment import Payment
 from app.models.user import User
-from app.routers.auth import require_admin
+from app.routers.auth import require_section_access
 
 
 router = APIRouter(
@@ -77,7 +77,7 @@ def get_order_local_date(created_at):
 @router.get("/summary")
 def dashboard_summary(
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin)
+    current_user: User = Depends(require_section_access("dashboard"))
 ):
     today, start, end = get_today_range()
 
@@ -186,7 +186,7 @@ def dashboard_summary(
 @router.get("/daily-sales")
 def daily_sales(
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin)
+    current_user: User = Depends(require_section_access("dashboard"))
 ):
     today = datetime.now(IST).date()
     start_date = today - timedelta(days=6)
@@ -242,7 +242,7 @@ def daily_sales(
 @router.get("/monthly-sales")
 def monthly_sales(
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin)
+    current_user: User = Depends(require_section_access("dashboard"))
 ):
     today = datetime.now(IST).date()
     current_month = today.replace(day=1)
@@ -325,7 +325,7 @@ def monthly_sales(
 def best_selling_products(
     limit: int = Query(10, ge=1, le=50),
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin)
+    current_user: User = Depends(require_section_access("dashboard"))
 ):
     results = (
         db.query(
@@ -381,7 +381,7 @@ def low_stock_products(
         le=1000
     ),
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin)
+    current_user: User = Depends(require_section_access("dashboard"))
 ):
     query = db.query(Product)
 
@@ -425,14 +425,16 @@ def low_stock_products(
 # 6. RECENT ORDERS
 # --------------------------------------------------
 
+
 @router.get("/recent-orders")
 def recent_orders(
     limit: int = Query(10, ge=1, le=100),
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin)
+    current_user: User = Depends(require_section_access("dashboard"))
 ):
     orders = (
-        db.query(Order)
+        db.query(Order, User.full_name)
+        .join(User, Order.customer_id == User.id)
         .order_by(Order.created_at.desc())
         .limit(limit)
         .all()
@@ -443,6 +445,7 @@ def recent_orders(
             "id": order.id,
             "order_number": order.order_number,
             "customer_id": order.customer_id,
+            "customer_name": customer_name,
             "delivery_type": order.delivery_type,
             "total_amount": decimal_to_float(
                 order.total_amount
@@ -452,8 +455,9 @@ def recent_orders(
             "order_status": order.order_status,
             "created_at": order.created_at
         }
-        for order in orders
+        for order, customer_name in orders
     ]
+
 
 
 # --------------------------------------------------
@@ -463,7 +467,7 @@ def recent_orders(
 @router.get("/payment-statistics")
 def payment_statistics(
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin)
+    current_user: User = Depends(require_section_access("dashboard"))
 ):
     # Razorpay payment statistics
     total_payments = (

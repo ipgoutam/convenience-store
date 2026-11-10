@@ -1,0 +1,43 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --color-navy: #101B2D;
+  --color-navy-secondary: #1C2B42;
+  --color-champagne: #D6B875;
+  --color-ivory: #F7F5EF;
+  --font-sans: "Inter", sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  font-family: "Inter", sans-serif;
+}
+
+button,
+a {
+  cursor: pointer;
+}
+.form-input {
+  width: 100%;
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  padding: 10px 12px;
+  outline: none;
+  background: white;
+}
+
+.form-input:focus {
+  border-color: #d6b875;
+  box-shadow: 0 0 0 2px rgba(214, 184, 117, 0.15);
+}

@@ -1,5 +1,5 @@
 
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, func
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, func, JSON
 from app.database import Base
 
 
@@ -10,7 +10,7 @@ class User(Base):
 
     full_name = Column(String(150), nullable=False)
 
-    email = Column(String(150), unique=True, nullable=False, index=True)
+    email = Column(String(150), unique=True, nullable=True, index=True)
 
     phone = Column(String(15), unique=True, nullable=True)
 
@@ -26,4 +26,9 @@ class User(Base):
         DateTime(timezone=True),
         server_default=func.now(),
         onupdate=func.now()
+    )
+    section_permissions = Column(
+        JSON,
+        nullable=False,
+        default=dict
     )

@@ -1,6 +1,6 @@
 
 from pydantic import BaseModel, EmailStr, Field
-from typing import Optional
+from typing import Optional, Dict
 
 
 class AdminInviteCreate(BaseModel):
@@ -27,3 +27,4 @@ class AdminAccountResponse(BaseModel):
     phone: Optional[str] = None
     role: str
     is_active: bool
+    section_permissions: Dict[str, bool] = {}

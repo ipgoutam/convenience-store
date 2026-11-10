@@ -256,7 +256,17 @@ def build_cart_response(cart: Cart):
         items.append({
             "id": item.id,
             "product_id": product.id,
+
+            # Product information
+            "name": product.name,
             "product_name": product.name,
+            "description": product.description,
+            "brand": product.brand,
+            "category": product.category,
+            "price": unit_price,
+            "mrp": product.mrp,
+
+            # Existing cart information
             "image_url": product.image_url,
             "unit": product.unit,
             "unit_price": unit_price,
@@ -265,6 +275,7 @@ def build_cart_response(cart: Cart):
             "quantity": quantity,
             "purchase_mode": item.purchase_mode,
             "purchase_amount": purchase_amount,
+            "allow_purchase_by_amount": product.allow_purchase_by_amount,
             "line_total": line_total,
             "stock": product.stock,
             "is_available": product.is_available
@@ -389,6 +400,11 @@ def add_to_cart(
             new_amount = None
 
         else:
+            if not product.allow_purchase_by_amount:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Amount-based purchasing is not enabled for this product"
+                )
             new_amount = Decimal(
                 str(item_data.amount)
             )
@@ -550,6 +566,11 @@ def update_cart_item(
             new_amount = None
 
         else:
+            if not product.allow_purchase_by_amount:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Amount-based purchasing is not enabled for this product"
+                )
             new_amount = Decimal(
                 str(item_data.amount)
             )

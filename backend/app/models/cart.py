@@ -11,6 +11,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import relationship
 
 from app.database import Base
+from app.models.product import Product
 
 
 class Cart(Base):

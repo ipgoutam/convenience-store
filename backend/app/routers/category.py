@@ -6,6 +6,8 @@ from sqlalchemy import func
 from app.database import get_db
 from app.models.category import Category
 from app.models.product import Product
+from app.models.user import User
+from app.routers.auth import require_section_access
 from app.schemas.category import (
     CategoryCreate,
     CategoryUpdate,
@@ -18,11 +20,12 @@ router = APIRouter(
 )
 
 
-# CREATE CATEGORY
+# CREATE CATEGORY (ADMIN ONLY)
 @router.post("/", response_model=CategoryResponse)
 def create_category(
     category_data: CategoryCreate,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_section_access("categories"))
 ):
     existing_category = db.query(Category).filter(
         func.lower(Category.name) == category_data.name.lower()
@@ -43,7 +46,7 @@ def create_category(
     return new_category
 
 
-# GET ALL CATEGORIES
+# GET ALL CATEGORIES (PUBLIC)
 @router.get("/", response_model=list[CategoryResponse])
 def get_categories(
     db: Session = Depends(get_db)
@@ -51,7 +54,35 @@ def get_categories(
     return db.query(Category).order_by(Category.id).all()
 
 
-# SEARCH CATEGORY
+# SHOP BY CATEGORY (PUBLIC)
+@router.get("/home", response_model=list[CategoryResponse])
+def get_home_categories(
+    db: Session = Depends(get_db)
+):
+    return db.query(Category).filter(
+        Category.is_active == True,
+        Category.show_on_home == True
+    ).order_by(
+        Category.display_order.asc(),
+        Category.name.asc()
+    ).all()
+
+
+# POPULAR CATEGORIES (PUBLIC)
+@router.get("/popular", response_model=list[CategoryResponse])
+def get_popular_categories(
+    db: Session = Depends(get_db)
+):
+    return db.query(Category).filter(
+        Category.is_active == True,
+        Category.show_in_popular == True
+    ).order_by(
+        Category.popular_display_order.asc(),
+        Category.name.asc()
+    ).all()
+
+
+# SEARCH CATEGORY (PUBLIC)
 @router.get("/search/", response_model=list[CategoryResponse])
 def search_categories(
     name: str = Query(..., min_length=1),
@@ -64,12 +95,13 @@ def search_categories(
     return categories
 
 
-# UPDATE CATEGORY
+# UPDATE CATEGORY (ADMIN ONLY)
 @router.put("/{category_id}", response_model=CategoryResponse)
 def update_category(
     category_id: int,
     category_data: CategoryUpdate,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_section_access("categories"))
 ):
     category = db.query(Category).filter(
         Category.id == category_id
@@ -117,12 +149,13 @@ def update_category(
     return category
 
 
-# ACTIVATE / DEACTIVATE CATEGORY
+# ACTIVATE / DEACTIVATE CATEGORY (ADMIN ONLY)
 @router.patch("/{category_id}/status", response_model=CategoryResponse)
 def update_category_status(
     category_id: int,
     is_active: bool,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_section_access("categories"))
 ):
     category = db.query(Category).filter(
         Category.id == category_id
@@ -142,11 +175,12 @@ def update_category_status(
     return category
 
 
-# DELETE CATEGORY
+# DELETE CATEGORY (ADMIN ONLY)
 @router.delete("/{category_id}")
 def delete_category(
     category_id: int,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_section_access("categories"))
 ):
     category = db.query(Category).filter(
         Category.id == category_id
@@ -178,7 +212,7 @@ def delete_category(
     }
 
 
-# GET CATEGORY BY ID
+# GET CATEGORY BY ID (PUBLIC)
 @router.get("/{category_id}", response_model=CategoryResponse)
 def get_category(
     category_id: int,

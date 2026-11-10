@@ -1,3 +1,4 @@
+
 import os
 import uuid
 from decimal import Decimal
@@ -25,7 +26,15 @@ from app.schemas.product import (
     ProductUpdate,
     ProductResponse
 )
-from app.routers.auth import require_admin
+from app.routers.auth import require_section_access
+from app.models.inventory_movement import InventoryMovement
+from app.models.brand import Brand
+
+# Restock notification models and service
+from app.models.stock_notification_subscription import (
+    StockNotificationSubscription
+)
+from app.services.notification_service import create_notification
 
 
 router = APIRouter(
@@ -86,6 +95,82 @@ def get_product_or_404(
 
 
 # --------------------------------------------------
+# HELPER: SEND RESTOCK NOTIFICATIONS
+# --------------------------------------------------
+
+def notify_product_back_in_stock(
+    db: Session,
+    product: Product
+):
+    """
+    Notify active subscribers when a product becomes
+    available again.
+
+    Notifications are created inside the current database
+    transaction and delivered after commit by the existing
+    notification service.
+    """
+
+    subscriptions = db.query(
+        StockNotificationSubscription
+    ).filter(
+        StockNotificationSubscription.product_id == product.id,
+        StockNotificationSubscription.is_active == True,
+        StockNotificationSubscription.notified_at.is_(None)
+    ).all()
+
+    now_subscribers = []
+
+    for subscription in subscriptions:
+
+        create_notification(
+            db=db,
+            user_id=subscription.user_id,
+            title="Product Back in Stock!",
+            message=(
+                f"{product.name} is available again. "
+                "Visit G-MART to order it now."
+            ),
+            notification_type="product_restock"
+        )
+
+        from datetime import datetime, timezone
+
+        subscription.notified_at = datetime.now(timezone.utc)
+
+        now_subscribers.append(subscription.user_id)
+
+    return len(now_subscribers)
+
+
+# --------------------------------------------------
+# HELPER: HANDLE RESTOCK TRANSITION
+# --------------------------------------------------
+
+def handle_stock_increase(
+    db: Session,
+    product: Product,
+    previous_stock: int,
+    previous_availability: bool
+):
+    was_out_of_stock = (
+        previous_stock <= 0 or not previous_availability
+    )
+
+    is_now_available = (
+        product.stock > 0 and product.is_available
+    )
+
+    if was_out_of_stock and is_now_available:
+        return notify_product_back_in_stock(
+            db,
+            product
+        )
+
+    return 0
+
+
+# --------------------------------------------------
 # 1. UPLOAD PRODUCT IMAGE (ADMIN ONLY)
 # --------------------------------------------------
 
@@ -93,7 +178,7 @@ def get_product_or_404(
 def upload_product_image(
     request: Request,
     file: UploadFile = File(...),
-    admin: User = Depends(require_admin)
+    admin: User = Depends(require_section_access("products"))
 ):
     extension = os.path.splitext(
         file.filename or ""
@@ -219,7 +304,7 @@ def upload_product_image(
 def create_product(
     product_data: ProductCreate,
     db: Session = Depends(get_db),
-    admin: User = Depends(require_admin)
+    admin: User = Depends(require_section_access("products"))
 ):
     product_values = product_data.model_dump()
 
@@ -314,6 +399,131 @@ def get_products_by_category(
     return db.query(Product).filter(
         Product.category.ilike(category)
     ).all()
+
+
+# --------------------------------------------------
+# 5A. POPULAR CATEGORY PRODUCTS (PUBLIC)
+# --------------------------------------------------
+
+@router.get(
+    "/popular-category/",
+    response_model=list[ProductResponse]
+)
+def get_popular_category_products(
+    category: str = Query(..., min_length=1),
+    db: Session = Depends(get_db)
+):
+    category = category.strip()
+
+    if not category:
+        raise HTTPException(
+            status_code=400,
+            detail="Category cannot be empty"
+        )
+
+    return db.query(Product).filter(
+        Product.category.ilike(category),
+        Product.is_available == True,
+        Product.stock > 0
+    ).order_by(
+        Product.popular_display_order.asc(),
+        Product.name.asc(),
+        Product.id.asc()
+    ).all()
+
+
+# --------------------------------------------------
+# ADMIN: GET PRODUCTS FOR POPULAR CATEGORY ORDERING
+# --------------------------------------------------
+
+@router.get(
+    "/popular-category/admin/",
+    response_model=list[ProductResponse]
+)
+def get_popular_category_products_admin(
+    category: str = Query(..., min_length=1),
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_section_access("homepage"))
+):
+    category = category.strip()
+
+    if not category:
+        raise HTTPException(
+            status_code=400,
+            detail="Category cannot be empty"
+        )
+
+    return db.query(Product).filter(
+        Product.category.ilike(category)
+    ).order_by(
+        Product.popular_display_order.asc(),
+        Product.name.asc(),
+        Product.id.asc()
+    ).all()
+
+
+# --------------------------------------------------
+# ADMIN: SAVE POPULAR CATEGORY PRODUCT ORDER
+# --------------------------------------------------
+
+@router.put("/popular-category/reorder/")
+def reorder_popular_category_products(
+    category: str = Query(..., min_length=1),
+    product_ids: list[int] = Query(...),
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_section_access("homepage"))
+):
+    category = category.strip()
+
+    if not category:
+        raise HTTPException(
+            status_code=400,
+            detail="Category cannot be empty"
+        )
+
+    if len(product_ids) != len(set(product_ids)):
+        raise HTTPException(
+            status_code=400,
+            detail="Duplicate product IDs are not allowed"
+        )
+
+    products = db.query(Product).filter(
+        Product.category.ilike(category)
+    ).all()
+
+    existing_ids = {product.id for product in products}
+    submitted_ids = set(product_ids)
+
+    if existing_ids != submitted_ids:
+        raise HTTPException(
+            status_code=400,
+            detail="Please provide every product in this category exactly once"
+        )
+
+    products_by_id = {
+        product.id: product
+        for product in products
+    }
+
+    try:
+        for position, product_id in enumerate(product_ids):
+            products_by_id[product_id].popular_display_order = position
+
+        db.commit()
+
+    except Exception:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail="Could not save product order"
+        )
+
+    return {
+        "message": "Popular category product order saved successfully",
+        "category": category,
+        "total_products": len(product_ids),
+        "product_ids": product_ids
+    }
 
 
 # --------------------------------------------------
@@ -424,7 +634,7 @@ def get_products_paginated(
 def get_low_stock_products(
     threshold: int = Query(default=10, ge=0),
     db: Session = Depends(get_db),
-    admin: User = Depends(require_admin)
+    admin: User = Depends(require_section_access("products"))
 ):
     return db.query(Product).filter(
         Product.stock <= threshold
@@ -438,7 +648,7 @@ def get_low_stock_products(
 @router.get("/count/")
 def get_product_count(
     db: Session = Depends(get_db),
-    admin: User = Depends(require_admin)
+    admin: User = Depends(require_section_access("products"))
 ):
     total_products = db.query(Product).count()
 
@@ -465,15 +675,20 @@ def get_product_count(
 def update_product_stock(
     product_id: int,
     quantity: int,
+    reason: str = Query(
+        default="Manual stock adjustment",
+        min_length=3,
+        max_length=250
+    ),
     db: Session = Depends(get_db),
-    admin: User = Depends(require_admin)
+    admin: User = Depends(require_section_access("products"))
 ):
-    product = get_product_or_404(
-        product_id,
-        db
-    )
+    product = get_product_or_404(product_id, db)
 
-    new_stock = product.stock + quantity
+    previous_stock = product.stock
+    previous_availability = product.is_available
+
+    new_stock = previous_stock + quantity
 
     if new_stock < 0:
         raise HTTPException(
@@ -481,15 +696,40 @@ def update_product_stock(
             detail="Stock cannot become negative"
         )
 
+    if quantity == 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Stock adjustment quantity cannot be zero"
+        )
+
     product.stock = new_stock
 
+    movement = InventoryMovement(
+        product_id=product.id,
+        product_name=product.name,
+        quantity_change=quantity,
+        previous_stock=previous_stock,
+        new_stock=new_stock,
+        movement_type="manual_adjustment",
+        reason=reason.strip(),
+        changed_by_user_id=admin.id
+    )
+
+    db.add(movement)
+
     try:
+        notified_count = handle_stock_increase(
+            db,
+            product,
+            previous_stock,
+            previous_availability
+        )
+
         db.commit()
         db.refresh(product)
 
     except Exception:
         db.rollback()
-
         raise HTTPException(
             status_code=500,
             detail="Could not update product stock"
@@ -499,7 +739,9 @@ def update_product_stock(
         "message": "Stock updated successfully",
         "product_id": product.id,
         "product_name": product.name,
-        "updated_stock": product.stock
+        "previous_stock": previous_stock,
+        "updated_stock": product.stock,
+        "restock_notifications_sent": notified_count
     }
 
 
@@ -512,16 +754,26 @@ def update_product_availability(
     product_id: int,
     is_available: bool,
     db: Session = Depends(get_db),
-    admin: User = Depends(require_admin)
+    admin: User = Depends(require_section_access("products"))
 ):
     product = get_product_or_404(
         product_id,
         db
     )
 
+    previous_stock = product.stock
+    previous_availability = product.is_available
+
     product.is_available = is_available
 
     try:
+        notified_count = handle_stock_increase(
+            db,
+            product,
+            previous_stock,
+            previous_availability
+        )
+
         db.commit()
         db.refresh(product)
 
@@ -536,7 +788,8 @@ def update_product_availability(
     return {
         "message": "Product availability updated successfully",
         "product_id": product.id,
-        "is_available": product.is_available
+        "is_available": product.is_available,
+        "restock_notifications_sent": notified_count
     }
 
 
@@ -570,16 +823,14 @@ def update_product(
     product_id: int,
     updated_product: ProductUpdate,
     db: Session = Depends(get_db),
-    admin: User = Depends(require_admin)
+    admin: User = Depends(require_section_access("products"))
 ):
-    product = get_product_or_404(
-        product_id,
-        db
-    )
+    product = get_product_or_404(product_id, db)
 
-    update_data = updated_product.model_dump(
-        exclude_unset=True
-    )
+    previous_stock = product.stock
+    previous_availability = product.is_available
+
+    update_data = updated_product.model_dump(exclude_unset=True)
 
     if not update_data:
         raise HTTPException(
@@ -587,7 +838,26 @@ def update_product(
             detail="No product information was provided"
         )
 
-    # These database fields cannot be set to None.
+    # Validate that the selected brand exists
+    if "brand_id" in update_data:
+        brand_id = update_data["brand_id"]
+
+        if brand_id is None:
+            update_data["brand"] = None
+        else:
+            selected_brand = db.query(Brand).filter(
+                Brand.id == brand_id
+            ).first()
+
+            if not selected_brand:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Selected brand not found"
+                )
+
+            update_data["brand"] = selected_brand.name
+
+    # Validate non-nullable fields
     non_nullable_fields = {
         "name",
         "category",
@@ -605,17 +875,9 @@ def update_product(
                 detail=f"{field} cannot be empty"
             )
 
-    # Validate the final price and MRP together,
-    # including values already stored in the database.
-    final_price = update_data.get(
-        "price",
-        product.price
-    )
-
-    final_mrp = update_data.get(
-        "mrp",
-        product.mrp
-    )
+    # Validate final price and MRP
+    final_price = update_data.get("price", product.price)
+    final_mrp = update_data.get("mrp", product.mrp)
 
     if final_mrp is not None and final_price > final_mrp:
         raise HTTPException(
@@ -623,16 +885,43 @@ def update_product(
             detail="Selling price cannot be greater than MRP"
         )
 
+    # Track stock changes
+    if (
+        "stock" in update_data
+        and update_data["stock"] != product.stock
+    ):
+        new_stock = update_data["stock"]
+
+        movement = InventoryMovement(
+            product_id=product.id,
+            product_name=product.name,
+            quantity_change=new_stock - previous_stock,
+            previous_stock=previous_stock,
+            new_stock=new_stock,
+            movement_type="manual_adjustment",
+            reason="Stock changed while editing product",
+            changed_by_user_id=admin.id
+        )
+
+        db.add(movement)
+
+    # Apply updates
     for field, value in update_data.items():
         setattr(product, field, value)
 
     try:
+        notified_count = handle_stock_increase(
+            db,
+            product,
+            previous_stock,
+            previous_availability
+        )
+
         db.commit()
         db.refresh(product)
 
     except IntegrityError:
         db.rollback()
-
         raise HTTPException(
             status_code=409,
             detail="A product with this SKU or barcode already exists"
@@ -640,7 +929,6 @@ def update_product(
 
     except Exception:
         db.rollback()
-
         raise HTTPException(
             status_code=500,
             detail="Could not update product"
@@ -657,7 +945,7 @@ def update_product(
 def delete_product(
     product_id: int,
     db: Session = Depends(get_db),
-    admin: User = Depends(require_admin)
+    admin: User = Depends(require_section_access("products"))
 ):
     product = get_product_or_404(
         product_id,

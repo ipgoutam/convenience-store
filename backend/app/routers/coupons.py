@@ -15,7 +15,7 @@ from app.schemas.coupon import (
     CouponResponse,
     CouponValidate
 )
-from app.routers.auth import require_admin
+from app.routers.auth import require_section_access
 
 
 router = APIRouter(
@@ -89,7 +89,7 @@ def validate_coupon_configuration(
 def create_coupon(
     coupon_data: CouponCreate,
     db: Session = Depends(get_db),
-    admin: User = Depends(require_admin)
+    admin: User = Depends(require_section_access("coupons"))
 ):
     data = coupon_data.model_dump()
 
@@ -146,7 +146,7 @@ def create_coupon(
 )
 def get_all_coupons(
     db: Session = Depends(get_db),
-    admin: User = Depends(require_admin),
+    admin: User = Depends(require_section_access("coupons")),
     skip: int = Query(0, ge=0),
     limit: int = Query(20, ge=1, le=100)
 ):
@@ -168,7 +168,7 @@ def update_coupon(
     coupon_id: int,
     coupon_data: CouponUpdate,
     db: Session = Depends(get_db),
-    admin: User = Depends(require_admin)
+    admin: User = Depends(require_section_access("coupons"))
 ):
     coupon = db.query(Coupon).filter(
         Coupon.id == coupon_id
@@ -265,7 +265,7 @@ def update_coupon(
 def delete_coupon(
     coupon_id: int,
     db: Session = Depends(get_db),
-    admin: User = Depends(require_admin)
+    admin: User = Depends(require_section_access("coupons"))
 ):
     coupon = db.query(Coupon).filter(
         Coupon.id == coupon_id

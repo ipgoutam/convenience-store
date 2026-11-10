@@ -1,6 +1,6 @@
 
 from decimal import Decimal, ROUND_HALF_UP
-from datetime import date
+from datetime import date, datetime
 from typing import Optional, Literal
 
 from pydantic import (
@@ -47,6 +47,7 @@ class ProductCreate(BaseModel):
     name: str = Field(..., min_length=2, max_length=150)
     description: Optional[str] = None
     brand: Optional[str] = Field(default=None, max_length=100)
+    brand_id: Optional[int] = Field(default=None, ge=1)
     category: str = Field(..., min_length=2, max_length=100)
 
     # Identification
@@ -72,6 +73,7 @@ class ProductCreate(BaseModel):
 
     # Selling unit
     unit: ProductUnit = "piece"
+    allow_purchase_by_amount: bool = False
 
     # Inventory
     stock: int = Field(default=0, ge=0)
@@ -110,6 +112,7 @@ class ProductUpdate(BaseModel):
     name: Optional[str] = Field(default=None, min_length=2, max_length=150)
     description: Optional[str] = None
     brand: Optional[str] = Field(default=None, max_length=100)
+    brand_id: Optional[int] = Field(default=None, ge=1)
     category: Optional[str] = Field(
         default=None, min_length=2, max_length=100
     )
@@ -136,6 +139,7 @@ class ProductUpdate(BaseModel):
     )
 
     unit: Optional[ProductUnit] = None
+    allow_purchase_by_amount: Optional[bool] = None
 
     stock: Optional[int] = Field(default=None, ge=0)
     low_stock_threshold: Optional[int] = Field(default=None, ge=0)
@@ -179,7 +183,9 @@ class ProductResponse(BaseModel):
     name: str
     description: Optional[str] = None
     brand: Optional[str] = None
+    brand_id: Optional[int] = None
     category: str
+    popular_display_order: int = 0
 
     sku: Optional[str] = None
     barcode: Optional[str] = None
@@ -190,6 +196,7 @@ class ProductResponse(BaseModel):
     discount_percentage: Decimal
 
     unit: str
+    allow_purchase_by_amount: bool
 
     stock: int
     low_stock_threshold: Optional[int] = None
@@ -200,6 +207,7 @@ class ProductResponse(BaseModel):
     is_available: bool
 
     model_config = ConfigDict(from_attributes=True)
+    created_at: Optional[datetime] = None
 
     @computed_field
     @property

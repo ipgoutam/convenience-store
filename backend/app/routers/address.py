@@ -201,7 +201,10 @@ def delete_address(
 
         db.commit()
 
-        
+        return {
+            "message": "Address deleted successfully"
+        }
+    
     except Exception:
         db.rollback()
         raise HTTPException(

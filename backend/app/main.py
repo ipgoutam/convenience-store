@@ -2,14 +2,14 @@
 import os
 from contextlib import asynccontextmanager
 from datetime import time
-
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi import FastAPI, Depends
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 
 from app.database import Base, engine, get_db, SessionLocal
-
+from app.services import notification_service
 
 # --------------------------------------------------
 # IMPORT ALL DATABASE MODELS
@@ -29,7 +29,17 @@ from app.models.payment import Payment
 from app.models.notification import Notification
 from app.models.admin_invite import AdminInvite
 from app.models.refund_attempt import RefundAttempt
-
+from app.models.inventory_movement import InventoryMovement
+from app.models.brand import Brand
+from app.models.notification_preference import NotificationPreference
+from app.models.notification_delivery import NotificationDelivery
+from app.models.password_reset_otp import PasswordResetOTP
+from app.models.product_image import ProductImage
+from app.models.product_frequently_bought_together import ProductFrequentlyBoughtTogether
+from app.models.wishlist import Wishlist
+from app.models.product_review import ProductReview
+from app.models.stock_notification_subscription import StockNotificationSubscription
+from app.models.recently_viewed import RecentlyViewed
 
 # --------------------------------------------------
 # IMPORT ALL ROUTERS
@@ -48,7 +58,12 @@ from app.routers.payments import router as payments_router
 from app.routers.notifications import router as notifications_router
 from app.routers.dashboard import router as dashboard_router
 from app.routers.admin_management import router as admin_management_router
-
+from app.routers.inventory import router as inventory_router
+from app.routers.brands import router as brands_router
+from app.routers.homepage import router as homepage_router
+from app.routers import admin_notifications
+from app.routers import notification_deliveries
+from app.routers import product_details
 
 # --------------------------------------------------
 # UPLOAD DIRECTORY
@@ -119,7 +134,16 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 # --------------------------------------------------
 # STATIC IMAGE UPLOADS
 # --------------------------------------------------
@@ -148,8 +172,12 @@ app.include_router(payments_router)
 app.include_router(notifications_router)
 app.include_router(dashboard_router)
 app.include_router(admin_management_router)
-
-
+app.include_router(inventory_router)
+app.include_router(brands_router)
+app.include_router(homepage_router)
+app.include_router(admin_notifications.router)
+app.include_router(notification_deliveries.router)
+app.include_router(product_details.router)
 # --------------------------------------------------
 # HOME ENDPOINT
 # --------------------------------------------------

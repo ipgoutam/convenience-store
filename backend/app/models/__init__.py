@@ -5,3 +5,5 @@ from app.models.cart import Cart, CartItem
 from app.models.payment import Payment
 from app.models.notification import Notification
 from app.models.refund_attempt import RefundAttempt
+from app.models.brand import Brand
+from app.models.homepage import HomepageHeroProduct

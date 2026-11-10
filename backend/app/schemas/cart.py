@@ -127,7 +127,16 @@ class CartItemResponse(BaseModel):
     id: int
     product_id: int
 
+    # Product information
+    name: str
     product_name: str
+    description: Optional[str] = None
+    brand: Optional[str] = None
+    category: str
+    price: Decimal
+    mrp: Optional[Decimal] = None
+
+    # Existing product information
     image_url: Optional[str] = None
 
     unit: str
@@ -140,7 +149,8 @@ class CartItemResponse(BaseModel):
 
     purchase_mode: PurchaseMode
     purchase_amount: Optional[Decimal] = None
-
+    allow_purchase_by_amount: bool
+    
     line_total: Decimal
 
     stock: int

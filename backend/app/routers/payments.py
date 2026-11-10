@@ -23,8 +23,7 @@ from app.schemas.payment import (
     PaymentVerify,
     PaymentResponse
 )
-from app.routers.auth import get_current_user
-from app.routers.auth import require_admin
+from app.routers.auth import get_current_user, require_section_access
 from app.services.razorpay_service import (
     create_razorpay_order,
     verify_razorpay_signature,
@@ -314,7 +313,7 @@ def verify_payment(
 @router.get("/admin/all", response_model=list[PaymentResponse])
 def get_all_payments(
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin)
+    current_user: User = Depends(require_section_access("orders"))
 ):
     return (
         db.query(Payment)
@@ -327,7 +326,7 @@ def get_all_payments(
 @router.get("/admin/summary")
 def get_payment_summary(
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin)
+    current_user: User = Depends(require_section_access("orders"))
 ):
     total_payments = db.query(func.count(Payment.id)).scalar() or 0
 
@@ -581,7 +580,7 @@ async def razorpay_webhook(
 def refund_payment(
     payment_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin)
+    current_user: User = Depends(require_section_access("orders"))
 ):
     payment = (
         db.query(Payment)
@@ -739,7 +738,7 @@ def refund_payment(
 def collect_cash_on_delivery(
     order_id: int,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin)
+    current_user: User = Depends(require_section_access("orders"))
 ):
     order = (
         db.query(Order)

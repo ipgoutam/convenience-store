@@ -10,7 +10,7 @@ from app.schemas.store_setting import (
     StoreSettingUpdate,
     StoreSettingResponse
 )
-from app.routers.auth import get_current_user, require_admin
+from app.routers.auth import get_current_user, require_section_access
 
 
 router = APIRouter(
@@ -38,7 +38,7 @@ def get_store_settings(db: Session = Depends(get_db)):
 def create_store_settings(
     settings_data: StoreSettingCreate,
     db: Session = Depends(get_db),
-    admin: User = Depends(require_admin)
+    admin: User = Depends(require_section_access("settings"))
 ):
     existing_settings = db.query(StoreSetting).first()
 
@@ -69,7 +69,7 @@ def create_store_settings(
 def update_store_settings(
     settings_data: StoreSettingUpdate,
     db: Session = Depends(get_db),
-    admin: User = Depends(require_admin)
+    admin: User = Depends(require_section_access("settings"))
 ):
     settings = db.query(StoreSetting).first()
 
